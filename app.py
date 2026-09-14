@@ -2,6 +2,7 @@ import os
 import warnings
 warnings.filterwarnings("ignore")
 
+import io
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -12,7 +13,11 @@ from rasterio.transform import from_origin
 from pyproj import Transformer
 
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.metrics import (
+    r2_score,
+    mean_squared_error,
+    mean_absolute_error
+)
 from sklearn.linear_model import LinearRegression
 
 from mgwr.gwr import GWR
@@ -26,7 +31,10 @@ st.set_page_config(
 )
 
 st.title("GWR-GWRC Spatial Model")
-st.write("GWR → GWRC. Esta versión no incluye kriging.")
+st.write(
+    "GWR → GWRC. Esta versión no incluye kriging."
+)
+
 
 VARS_MODEL = [
     "ELEV",
@@ -46,6 +54,7 @@ RESOLUTION = 30.0
 
 @st.cache_data(show_spinner=False)
 def save_uploaded_file(uploaded_file):
+
     import tempfile
 
     suffix = os.path.splitext(
@@ -411,6 +420,12 @@ def run_gwr_gwrc(
 
         bw_opt = selector.search(
             criterion="AICc"
+        )
+
+        bw_opt = int(
+            round(
+                float(bw_opt)
+            )
         )
 
     else:
@@ -901,7 +916,9 @@ def create_rasters(
 
     width = int(
         np.ceil(
-            (xmax - xmin)
+            (
+                xmax - xmin
+            )
             /
             RESOLUTION
         )
@@ -909,7 +926,9 @@ def create_rasters(
 
     height = int(
         np.ceil(
-            (ymax - ymin)
+            (
+                ymax - ymin
+            )
             /
             RESOLUTION
         )
@@ -1252,33 +1271,31 @@ def create_rasters(
     progress.progress(
         1.0
     )
-        grid_points = np.column_stack(
-            [
-                coords[:, 0],
-                coords[:, 1]
-            ]
-        )
-    grid_coordinates = np.column_stack(
 
+    # Corrected grid_points block.
+    # coords is n x 2 and local_CN/local_lambda
+    # contain n values.
+    grid_points = np.column_stack(
+        [
+            coords[:, 0],
+            coords[:, 1]
+        ]
+    )
+
+    grid_coordinates = np.column_stack(
         [
             grid_x.ravel(),
             grid_y.ravel()
         ]
-
     )
 
     cn_grid = griddata(
-
         grid_points,
-
         results[
             "local_CN"
         ],
-
         grid_coordinates,
-
         method="nearest"
-
     )
 
     cn_grid = (
@@ -1291,17 +1308,12 @@ def create_rasters(
     )
 
     lambda_grid = griddata(
-
         grid_points,
-
         results[
             "local_lambda"
         ],
-
         grid_coordinates,
-
         method="nearest"
-
     )
 
     lambda_grid = (
@@ -1425,6 +1437,7 @@ for variable in VARS_MODEL:
         variable
     ] = uploaded
 
+
 st.sidebar.subheader(
     "Configuración GWR"
 )
@@ -1455,6 +1468,7 @@ run_model = (
     )
 )
 
+
 if excel_upload is None:
 
     st.info(
@@ -1462,6 +1476,7 @@ if excel_upload is None:
     )
 
     st.stop()
+
 
 missing_rasters = [
 
@@ -1473,6 +1488,7 @@ missing_rasters = [
     if uploaded is None
 
 ]
+
 
 if missing_rasters:
 
@@ -1487,6 +1503,7 @@ if missing_rasters:
     )
 
     st.stop()
+
 
 if not run_model:
 
@@ -1814,8 +1831,6 @@ try:
     st.subheader(
         "Descargas"
     )
-
-    import io
 
     excel_buffer = io.BytesIO()
 
