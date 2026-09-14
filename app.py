@@ -363,7 +363,7 @@ def apply_gwrc(
             corrected_betas[
                 i,
                 1:
-            ] = beta_ridge.flatten()
+            ] = beta_ridge.flatten()[1:]
 
         except np.linalg.LinAlgError:
 
@@ -418,6 +418,8 @@ def run_gwr_gwrc(
         .values
         .astype(float)
     )
+    y_gwr_1d = y_gwr.copy()
+    y_gwr = y_gwr.reshape((-1, 1))
 
     y_gwr_2d = y_gwr.reshape((-1, 1))
 
@@ -447,7 +449,6 @@ def run_gwr_gwrc(
         fixed=False,
         kernel="bisquare",
         constant=True,
-        n_jobs=1
     )
 
     gwr_res = gwr_model.fit()
@@ -496,7 +497,7 @@ def run_gwr_gwrc(
     )
 
     gwr_r2 = r2_score(
-        y_gwr,
+        y_gwr_1d,
         gwr_pred
     )
 
@@ -508,7 +509,7 @@ def run_gwr_gwrc(
     )
 
     gwr_mae = mean_absolute_error(
-        y_gwr,
+        y_gwr_1d,
         gwr_pred
     )
 
@@ -559,7 +560,7 @@ def run_gwr_gwrc(
     )
 
     gwrc_r2 = r2_score(
-        y_gwr,
+        y_gwr_1d,
         gwrc_pred
     )
 
@@ -571,7 +572,7 @@ def run_gwr_gwrc(
     )
 
     gwrc_mae = mean_absolute_error(
-        y_gwr,
+        y_gwr_1d,
         gwrc_pred
     )
 
@@ -673,7 +674,7 @@ def run_gwr_gwrc(
 
         "Y": data["Y"].values,
 
-        "SOC_Observed": y_gwr,
+        "SOC_Observed": y_gwr_1d,
 
         "SOC_GWR": gwr_pred,
 
