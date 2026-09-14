@@ -722,83 +722,75 @@ def run_gwr_gwrc(
     }
 
 
-def prepare_rasters(
-    uploaded_rasters
-):
+def prepare_rasters(uploaded_rasters):
 
     raster_arrays = {}
-
-    bounds = None
+    bounds_target = None
 
     for var in VARS_MODEL:
+        uploaded_file = uploaded_rasters[var]
 
-        uploaded_file = (
-            uploaded_rasters[var]
-        )
+        with rasterio.open(uploaded_file) as src:
+            if src.crs is None:
+                raise ValueError(
+                    f"El raster {var} no tiene CRS definido."
+                )
 
-        with rasterio.open(
-            uploaded_file
-        ) as src:
+            transformer = Transformer.from_crs(
+                src.crs,
+                TARGET_CRS,
+                always_xy=True
+            )
 
-            left = src.bounds.left
-            bottom = src.bounds.bottom
-            right = src.bounds.right
-            top = src.bounds.top
+            xs = [src.bounds.left, src.bounds.right]
+            ys = [src.bounds.bottom, src.bounds.top]
 
-            if bounds is None:
+            transformed = [
+                transformer.transform(x, y)
+                for x in xs
+                for y in ys
+            ]
 
-                bounds = [
-                    left,
-                    bottom,
-                    right,
-                    top
-                ]
+            tx = [p[0] for p in transformed]
+            ty = [p[1] for p in transformed]
 
+            current_bounds = [
+                min(tx), min(ty), max(tx), max(ty)
+            ]
+
+            if bounds_target is None:
+                bounds_target = current_bounds
             else:
-
-                bounds[0] = min(
-                    bounds[0],
-                    left
+                bounds_target[0] = min(
+                    bounds_target[0], current_bounds[0]
+                )
+                bounds_target[1] = min(
+                    bounds_target[1], current_bounds[1]
+                )
+                bounds_target[2] = max(
+                    bounds_target[2], current_bounds[2]
+                )
+                bounds_target[3] = max(
+                    bounds_target[3], current_bounds[3]
                 )
 
-                bounds[1] = min(
-                    bounds[1],
-                    bottom
-                )
-
-                bounds[2] = max(
-                    bounds[2],
-                    right
-                )
-
-                bounds[3] = max(
-                    bounds[3],
-                    top
-                )
-
-    min_x, min_y, max_x, max_y = (
-        bounds
-    )
+    min_x, min_y, max_x, max_y = bounds_target
 
     width = int(
         np.ceil(
-            (
-                max_x - min_x
-            )
-            /
-            RASTER_RESOLUTION
+            (max_x - min_x) / RASTER_RESOLUTION
+        )
+    )
+    height = int(
+        np.ceil(
+            (max_y - min_y) / RASTER_RESOLUTION
         )
     )
 
-    height = int(
-        np.ceil(
-            (
-                max_y - min_y
-            )
-            /
-            RASTER_RESOLUTION
+    if width <= 0 or height <= 0:
+        raise ValueError(
+            "La extensión espacial de los rasters no es válida después de reproyectarla a EPSG:32717."
         )
-    )
 
     transform = from_origin(
         min_x,
@@ -808,29 +800,17 @@ def prepare_rasters(
     )
 
     for var in VARS_MODEL:
+        uploaded_file = uploaded_rasters[var]
 
-        uploaded_file = (
-            uploaded_rasters[var]
-        )
-
-        with rasterio.open(
-            uploaded_file
-        ) as src:
-
+        with rasterio.open(uploaded_file) as src:
             destination = np.full(
-                (
-                    height,
-                    width
-                ),
+                (height, width),
                 np.nan,
                 dtype=np.float32
             )
 
             reproject(
-                source=rasterio.band(
-                    src,
-                    1
-                ),
+                source=rasterio.band(src, 1),
                 destination=destination,
                 src_transform=src.transform,
                 src_crs=src.crs,
@@ -840,39 +820,19 @@ def prepare_rasters(
                 dst_nodata=np.nan
             )
 
-            raster_arrays[var] = (
-                destination
-            )
+            raster_arrays[var] = destination
 
     raster_std = {}
 
     for var in VARS_MODEL:
+        arr = raster_arrays[var].astype(float)
+        mean = np.nanmean(arr)
+        std = np.nanstd(arr)
 
-        arr = raster_arrays[var]
-
-        mean = np.nanmean(
-            arr
-        )
-
-        std = np.nanstd(
-            arr
-        )
-
-        if (
-            std == 0
-            or
-            np.isnan(std)
-        ):
-
-            raster_std[var] = (
-                np.zeros_like(arr)
-            )
-
+        if std == 0 or np.isnan(std):
+            raster_std[var] = np.zeros_like(arr)
         else:
-
-            raster_std[var] = (
-                arr - mean
-            ) / std
+            raster_std[var] = (arr - mean) / std
 
     return (
         raster_arrays,
@@ -1131,85 +1091,90 @@ def krige_residuals(
 ):
 
     valid = (
-        np.isfinite(
-            coords[:, 0]
-        )
-        &
-        np.isfinite(
-            coords[:, 1]
-        )
-        &
-        np.isfinite(
-            residuals
-        )
+        np.isfinite(coords[:, 0])
+        & np.isfinite(coords[:, 1])
+        & np.isfinite(residuals)
     )
 
-    krig_x = coords[
-        valid,
-        0
-    ]
+    krig_x = np.asarray(coords[valid, 0], dtype=float)
+    krig_y = np.asarray(coords[valid, 1], dtype=float)
+    krig_residuals = np.asarray(
+        residuals[valid], dtype=float
+    )
 
-    krig_y = coords[
-        valid,
-        1
-    ]
-
-    krig_residuals = residuals[
-        valid
-    ]
-
-    if len(
-        krig_residuals
-    ) < 3:
-
+    if len(krig_residuals) < 3:
         raise ValueError(
             "No existen suficientes residuos válidos para realizar el kriging."
         )
 
-    ok = OrdinaryKriging(
-        krig_x,
-        krig_y,
-        krig_residuals,
-        variogram_model="spherical",
-        verbose=False,
-        enable_plotting=False,
-        coordinates_type="euclidean"
-    )
+    if np.nanstd(krig_residuals) == 0:
+        kriged = np.full(
+            (len(grid_y), len(grid_x)),
+            float(np.nanmean(krig_residuals)),
+            dtype=float
+        )
+        variance = np.zeros_like(kriged)
+        return kriged, variance
 
     increasing_y = np.sort(
-        grid_y
+        np.asarray(grid_y, dtype=float)
     )
 
-    kriged, variance = ok.execute(
-        "grid",
-        grid_x,
-        increasing_y
-    )
+    try:
+        ok = OrdinaryKriging(
+            krig_x,
+            krig_y,
+            krig_residuals,
+            variogram_model="spherical",
+            verbose=False,
+            enable_plotting=False,
+            exact_values=True,
+            coordinates_type="euclidean",
+            pseudo_inv=True,
+            pseudo_inv_type="pinv"
+        )
 
-    kriged = np.asarray(
-        kriged,
-        dtype=float
-    )
+        kriged, variance = ok.execute(
+            "grid",
+            np.asarray(grid_x, dtype=float),
+            increasing_y
+        )
 
-    variance = np.asarray(
-        variance,
-        dtype=float
-    )
+    except Exception:
+        ok = OrdinaryKriging(
+            krig_x,
+            krig_y,
+            krig_residuals,
+            variogram_model="linear",
+            verbose=False,
+            enable_plotting=False,
+            exact_values=True,
+            coordinates_type="euclidean",
+            pseudo_inv=True,
+            pseudo_inv_type="pinv"
+        )
+
+        kriged, variance = ok.execute(
+            "grid",
+            np.asarray(grid_x, dtype=float),
+            increasing_y
+        )
+
+    kriged = np.ma.filled(
+        np.ma.asarray(kriged),
+        np.nan
+    ).astype(float)
+
+    variance = np.ma.filled(
+        np.ma.asarray(variance),
+        np.nan
+    ).astype(float)
 
     if grid_y[0] > grid_y[-1]:
+        kriged = np.flipud(kriged)
+        variance = np.flipud(variance)
 
-        kriged = np.flipud(
-            kriged
-        )
-
-        variance = np.flipud(
-            variance
-        )
-
-    return (
-        kriged,
-        variance
-    )
+    return kriged, variance
 
 
 def create_geotiff(
@@ -1866,10 +1831,21 @@ if run_model:
             grid_y
         )
 
-    raster_gwrck = (
-        raster_gwrc
+    raster_gwrck = np.full_like(
+        raster_gwrc,
+        np.nan,
+        dtype=float
+    )
+
+    valid_final_raster = (
+        np.isfinite(raster_gwrc)
+        & np.isfinite(kriged_residual)
+    )
+
+    raster_gwrck[valid_final_raster] = (
+        raster_gwrc[valid_final_raster]
         +
-        kriged_residual
+        kriged_residual[valid_final_raster]
     )
 
     point_rows, point_cols = rasterio.transform.rowcol(
@@ -1888,6 +1864,13 @@ if run_model:
         & (point_cols < raster_gwrck.shape[1])
     )
 
+    valid_extract &= np.isfinite(
+        raster_gwrck[
+            np.clip(point_rows, 0, raster_gwrck.shape[0] - 1),
+            np.clip(point_cols, 0, raster_gwrck.shape[1] - 1)
+        ]
+    )
+
     gwrck_extracted = np.full(
         len(results["coords"]),
         np.nan,
@@ -1904,6 +1887,13 @@ if run_model:
     valid_metrics = (
         np.isfinite(observed)
         & np.isfinite(gwrck_extracted)
+    )
+
+    st.write(
+        f"Celdas GWRCK válidas: {int(np.sum(valid_final_raster)):,}"
+    )
+    st.write(
+        f"Puntos con GWRCK extraído: {int(np.sum(valid_metrics))}/{len(observed)}"
     )
 
     if np.sum(valid_metrics) >= 2:
