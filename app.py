@@ -9,12 +9,17 @@ import streamlit as st
 import rasterio
 
 from rasterio.transform import from_origin
-from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.warp import reproject, Resampling
 
 from pyproj import Transformer
+
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.metrics import (
+    r2_score,
+    mean_squared_error,
+    mean_absolute_error
+)
 
 from mgwr.gwr import GWR
 from mgwr.sel_bw import Sel_BW
@@ -40,6 +45,7 @@ VARS_MODEL = [
     "BSI"
 ]
 
+
 RASTER_FILES = {
     "ELEV": "ELEV.tif",
     "Curvatu": "Curvatu.tif",
@@ -51,50 +57,95 @@ RASTER_FILES = {
     "BSI": "BSI.tif"
 }
 
+
 TARGET_CRS = "EPSG:32717"
 SOURCE_CRS = "EPSG:4326"
+
 RASTER_RESOLUTION = 30.0
+
 CN_THRESHOLD = 25.0
 
 
-def calculate_vif(X, variables):
+def calculate_vif(
+    X,
+    variables
+):
 
     vif_values = []
 
-    for i in range(X.shape[1]):
+    for i in range(
+        X.shape[1]
+    ):
 
-        X_other = np.delete(X, i, axis=1)
+        X_other = np.delete(
+            X,
+            i,
+            axis=1
+        )
+
         y_target = X[:, i]
 
         model = LinearRegression()
-        model.fit(X_other, y_target)
 
-        r2 = model.score(X_other, y_target)
+        model.fit(
+            X_other,
+            y_target
+        )
+
+        r2 = model.score(
+            X_other,
+            y_target
+        )
 
         if r2 >= 0.999999:
-            vif = np.inf
-        else:
-            vif = 1.0 / (1.0 - r2)
 
-        vif_values.append(vif)
+            vif = np.inf
+
+        else:
+
+            vif = 1.0 / (
+                1.0 - r2
+            )
+
+        vif_values.append(
+            vif
+        )
 
     return pd.DataFrame({
+
         "Variable": variables,
+
         "VIF": vif_values
+
     })
 
 
-def bisquare_weights(distances, bandwidth):
+def bisquare_weights(
+    distances,
+    bandwidth
+):
 
-    weights = np.zeros_like(distances, dtype=float)
+    weights = np.zeros_like(
+        distances,
+        dtype=float
+    )
 
     if bandwidth <= 0:
+
         return weights
 
-    mask = distances < bandwidth
+    mask = (
+        distances < bandwidth
+    )
 
     weights[mask] = (
-        1.0 - (distances[mask] / bandwidth) ** 2
+        1.0
+        -
+        (
+            distances[mask]
+            /
+            bandwidth
+        ) ** 2
     ) ** 2
 
     return weights
@@ -110,65 +161,124 @@ def calculate_local_condition_numbers(
     n = coords.shape[0]
 
     distance_matrix = np.sqrt(
-        (coords[:, None, 0] - coords[None, :, 0]) ** 2
+        (
+            coords[:, None, 0]
+            -
+            coords[None, :, 0]
+        ) ** 2
         +
-        (coords[:, None, 1] - coords[None, :, 1]) ** 2
+        (
+            coords[:, None, 1]
+            -
+            coords[None, :, 1]
+        ) ** 2
     )
 
-    local_cn = np.full(n, np.nan)
+    local_cn = np.full(
+        n,
+        np.nan
+    )
 
     for i in range(n):
 
-        distances = distance_matrix[i]
+        distances = (
+            distance_matrix[i]
+        )
 
-        sorted_distances = np.sort(distances)
+        sorted_distances = np.sort(
+            distances
+        )
 
         bw_index = int(bw) - 1
 
         if bw_index < 0:
+
             bw_index = 0
 
-        if bw_index >= len(sorted_distances):
-            bw_index = len(sorted_distances) - 1
+        if bw_index >= len(
+            sorted_distances
+        ):
 
-        local_bw = sorted_distances[bw_index]
+            bw_index = (
+                len(sorted_distances)
+                - 1
+            )
+
+        local_bw = (
+            sorted_distances[bw_index]
+        )
 
         if local_bw <= 0:
-            positive_distances = sorted_distances[
-                sorted_distances > 0
-            ]
 
-            if len(positive_distances) == 0:
+            positive_distances = (
+                sorted_distances[
+                    sorted_distances > 0
+                ]
+            )
+
+            if len(
+                positive_distances
+            ) == 0:
+
                 local_bw = 1.0
+
             else:
-                local_bw = positive_distances[0]
+
+                local_bw = (
+                    positive_distances[0]
+                )
 
         weights = bisquare_weights(
             distances,
             local_bw
         )
 
-        W = np.diag(weights)
+        W = np.diag(
+            weights
+        )
 
-        XtWX = X.T @ W @ X
+        XtWX = (
+            X.T
+            @ W
+            @ X
+        )
 
         eigvals = np.linalg.eigvalsh(
             XtWX
         )
 
-        eigvals = np.real(eigvals)
+        eigvals = np.real(
+            eigvals
+        )
 
-        eig_max = np.max(eigvals)
-        eig_min = np.min(eigvals)
+        eig_max = np.max(
+            eigvals
+        )
 
-        if eig_min <= 0 or eig_max <= 0:
+        eig_min = np.min(
+            eigvals
+        )
+
+        if (
+            eig_min <= 0
+            or
+            eig_max <= 0
+        ):
+
             local_cn[i] = np.inf
+
         else:
+
             local_cn[i] = np.sqrt(
-                eig_max / eig_min
+                eig_max
+                /
+                eig_min
             )
 
-    return local_cn, distance_matrix
+    return (
+        local_cn,
+        distance_matrix
+    )
 
 
 def apply_gwrc(
@@ -183,70 +293,124 @@ def apply_gwrc(
 
     n = coords.shape[0]
 
-    corrected_betas = gwr_params.copy()
+    corrected_betas = np.array(
+        gwr_params,
+        dtype=float,
+        copy=True
+    )
 
-    lambda_local = np.zeros(n)
+    lambda_local = np.zeros(
+        n
+    )
 
     for i in range(n):
 
         if local_cn[i] <= CN_THRESHOLD:
+
             continue
 
-        distances = distance_matrix[i]
+        distances = (
+            distance_matrix[i]
+        )
 
-        sorted_distances = np.sort(distances)
+        sorted_distances = np.sort(
+            distances
+        )
 
         bw_index = int(bw) - 1
 
         if bw_index < 0:
+
             bw_index = 0
 
-        if bw_index >= len(sorted_distances):
-            bw_index = len(sorted_distances) - 1
+        if bw_index >= len(
+            sorted_distances
+        ):
 
-        local_bw = sorted_distances[bw_index]
+            bw_index = (
+                len(sorted_distances)
+                - 1
+            )
+
+        local_bw = (
+            sorted_distances[bw_index]
+        )
 
         if local_bw <= 0:
 
-            positive_distances = sorted_distances[
-                sorted_distances > 0
-            ]
+            positive_distances = (
+                sorted_distances[
+                    sorted_distances > 0
+                ]
+            )
 
-            if len(positive_distances) == 0:
+            if len(
+                positive_distances
+            ) == 0:
+
                 local_bw = 1.0
+
             else:
-                local_bw = positive_distances[0]
+
+                local_bw = (
+                    positive_distances[0]
+                )
 
         weights = bisquare_weights(
             distances,
             local_bw
         )
 
-        W = np.diag(weights)
+        W = np.diag(
+            weights
+        )
 
-        XtWX = X.T @ W @ X
+        XtWX = (
+            X.T
+            @ W
+            @ X
+        )
 
         eigvals = np.linalg.eigvalsh(
             XtWX
         )
 
-        eigvals = np.real(eigvals)
+        eigvals = np.real(
+            eigvals
+        )
 
-        eig_min = np.min(eigvals)
+        eig_min = np.min(
+            eigvals
+        )
 
-        lambda_value = 0.01 * eig_min
+        lambda_value = (
+            0.01
+            *
+            eig_min
+        )
 
         if lambda_value < 0.001:
+
             lambda_value = 0.001
 
-        lambda_local[i] = lambda_value
+        lambda_local[i] = (
+            lambda_value
+        )
 
-        XTWy = X.T @ W @ y
+        XTWy = (
+            X.T
+            @ W
+            @ y
+        )
 
         ridge_matrix = (
             XtWX
             +
-            lambda_value * np.eye(X.shape[1])
+            lambda_value
+            *
+            np.eye(
+                X.shape[1]
+            )
         )
 
         try:
@@ -266,7 +430,10 @@ def apply_gwrc(
                 gwr_params[i, 1:]
             )
 
-    return corrected_betas, lambda_local
+    return (
+        corrected_betas,
+        lambda_local
+    )
 
 
 def run_gwr_gwrc(
@@ -274,7 +441,25 @@ def run_gwr_gwrc(
     bandwidth
 ):
 
-    coords = data[["X_proj", "Y_proj"]].values
+    bandwidth = int(
+        bandwidth
+    )
+
+    n = len(data)
+
+    if bandwidth < 2:
+
+        raise ValueError(
+            "El bandwidth debe ser mayor o igual a 2."
+        )
+
+    if bandwidth > n:
+
+        bandwidth = n
+
+    coords = data[
+        ["X_proj", "Y_proj"]
+    ].values.astype(float)
 
     X_raw = (
         data[VARS_MODEL]
@@ -303,7 +488,10 @@ def run_gwr_gwrc(
     )
 
     X_gwr = np.column_stack(
-        [np.ones(len(X)), X]
+        [
+            np.ones(len(X)),
+            X
+        ]
     )
 
     gwr_model = GWR(
@@ -313,15 +501,48 @@ def run_gwr_gwrc(
         bw=bandwidth,
         fixed=False,
         kernel="bisquare",
-        constant=True
+        constant=True,
+        n_jobs=1
     )
 
     gwr_res = gwr_model.fit()
 
-    gwr_pred = (
-        gwr_res.predy
-        .flatten()
+    gwr_params = np.asarray(
+        gwr_res.params,
+        dtype=float
     )
+
+    if gwr_params.ndim == 1:
+
+        if gwr_params.size == (
+            len(VARS_MODEL) + 1
+        ):
+
+            gwr_params = np.tile(
+                gwr_params,
+                (n, 1)
+            )
+
+        else:
+
+            raise ValueError(
+                "La matriz de parámetros GWR no tiene dimensiones válidas."
+            )
+
+    if gwr_params.shape != (
+        n,
+        len(VARS_MODEL) + 1
+    ):
+
+        raise ValueError(
+            "Dimensiones inesperadas en los parámetros GWR: "
+            f"{gwr_params.shape}"
+        )
+
+    gwr_pred = np.asarray(
+        gwr_res.predy,
+        dtype=float
+    ).reshape(-1)
 
     gwr_residuals = (
         y_gwr
@@ -360,7 +581,7 @@ def run_gwr_gwrc(
             coords,
             X_gwr,
             y_gwr,
-            gwr_res.params,
+            gwr_params,
             bandwidth,
             local_cn,
             distance_matrix
@@ -368,18 +589,23 @@ def run_gwr_gwrc(
     )
 
     gwrc_pred = np.zeros(
-        len(X)
+        len(X),
+        dtype=float
     )
 
     for i in range(len(X)):
 
         x_local = np.concatenate(
-            [[1.0], X[i]]
+            [
+                [1.0],
+                X[i]
+            ]
         )
 
         gwrc_pred[i] = (
             x_local
-            @ corrected_betas[i]
+            @
+            corrected_betas[i]
         )
 
     gwrc_residuals = (
@@ -468,7 +694,9 @@ def run_gwr_gwrc(
         "CN_Threshold": CN_THRESHOLD,
 
         "Ridge_Correction": (
-            local_cn > CN_THRESHOLD
+            local_cn
+            >
+            CN_THRESHOLD
         ),
 
         "Lambda_Local": lambda_local
@@ -478,7 +706,9 @@ def run_gwr_gwrc(
         corrected_betas,
         columns=[
             "Intercept"
-        ] + VARS_MODEL
+        ]
+        +
+        VARS_MODEL
     )
 
     coefficient_table.insert(
@@ -508,24 +738,43 @@ def run_gwr_gwrc(
         "SOC_GWRC": gwrc_pred,
 
         "Residual_GWRC": gwrc_residuals
+
     })
 
     return {
+
         "coords": coords,
+
         "X": X,
+
         "scaler": scaler,
+
         "gwr_res": gwr_res,
+
+        "gwr_params": gwr_params,
+
         "gwr_pred": gwr_pred,
+
         "gwrc_pred": gwrc_pred,
+
         "gwrc_residuals": gwrc_residuals,
+
         "corrected_betas": corrected_betas,
+
         "local_cn": local_cn,
+
         "lambda_local": lambda_local,
+
         "distance_matrix": distance_matrix,
+
         "results_table": results_table,
+
         "cn_table": cn_table,
+
         "coefficient_table": coefficient_table,
+
         "residual_table": residual_table,
+
         "vif_table": vif_table
     }
 
@@ -540,7 +789,9 @@ def prepare_rasters(
 
     for var in VARS_MODEL:
 
-        uploaded_file = uploaded_rasters[var]
+        uploaded_file = (
+            uploaded_rasters[var]
+        )
 
         with rasterio.open(
             uploaded_file
@@ -581,11 +832,17 @@ def prepare_rasters(
                     top
                 )
 
-    min_x, min_y, max_x, max_y = bounds
+    min_x, min_y, max_x, max_y = (
+        bounds
+    )
 
     width = int(
         np.ceil(
-            (max_x - min_x)
+            (
+                max_x
+                -
+                min_x
+            )
             /
             RASTER_RESOLUTION
         )
@@ -593,7 +850,11 @@ def prepare_rasters(
 
     height = int(
         np.ceil(
-            (max_y - min_y)
+            (
+                max_y
+                -
+                min_y
+            )
             /
             RASTER_RESOLUTION
         )
@@ -608,7 +869,9 @@ def prepare_rasters(
 
     for var in VARS_MODEL:
 
-        uploaded_file = uploaded_rasters[var]
+        uploaded_file = (
+            uploaded_rasters[var]
+        )
 
         with rasterio.open(
             uploaded_file
@@ -651,11 +914,19 @@ def prepare_rasters(
 
         arr = raster_arrays[var]
 
-        mean = np.nanmean(arr)
+        mean = np.nanmean(
+            arr
+        )
 
-        std = np.nanstd(arr)
+        std = np.nanstd(
+            arr
+        )
 
-        if std == 0 or np.isnan(std):
+        if (
+            std == 0
+            or
+            np.isnan(std)
+        ):
 
             raster_std[var] = (
                 np.zeros_like(arr)
@@ -666,6 +937,7 @@ def prepare_rasters(
             raster_std[var] = (
                 arr - mean
             ) / std
+        )
 
     return (
         raster_arrays,
@@ -714,7 +986,11 @@ def predict_raster_gwr_gwrc(
     grid_x = (
         transform.c
         +
-        (np.arange(width) + 0.5)
+        (
+            np.arange(width)
+            +
+            0.5
+        )
         *
         transform.a
     )
@@ -722,7 +998,11 @@ def predict_raster_gwr_gwrc(
     grid_y = (
         transform.f
         +
-        (np.arange(height) + 0.5)
+        (
+            np.arange(height)
+            +
+            0.5
+        )
         *
         transform.e
     )
@@ -747,18 +1027,33 @@ def predict_raster_gwr_gwrc(
         valid_cols
     ):
 
-        x_values = np.array([
-            raster_std[var][row, col]
-            for var in VARS_MODEL
-        ])
+        x_values = np.array(
+            [
+                raster_std[var][
+                    row,
+                    col
+                ]
+                for var in VARS_MODEL
+            ],
+            dtype=float
+        )
 
         point_x = grid_x[col]
+
         point_y = grid_y[row]
 
         distances = np.sqrt(
-            (coords[:, 0] - point_x) ** 2
+            (
+                coords[:, 0]
+                -
+                point_x
+            ) ** 2
             +
-            (coords[:, 1] - point_y) ** 2
+            (
+                coords[:, 1]
+                -
+                point_y
+            ) ** 2
         )
 
         order = np.argsort(
@@ -767,7 +1062,10 @@ def predict_raster_gwr_gwrc(
 
         k = int(
             min(
-                max(1, int(bandwidth)),
+                max(
+                    1,
+                    int(bandwidth)
+                ),
                 len(order)
             )
         )
@@ -831,26 +1129,41 @@ def predict_raster_gwr_gwrc(
             weights[:, None]
             *
             gwr_params[selected]
-        ).sum(axis=0)
+        ).sum(
+            axis=0
+        )
 
         local_gwrc_beta = (
             weights[:, None]
             *
             corrected_betas[selected]
-        ).sum(axis=0)
+        ).sum(
+            axis=0
+        )
 
         x_design = np.concatenate(
-            [[1.0], x_values]
+            [
+                [1.0],
+                x_values
+            ]
         )
 
-        raster_gwr[row, col] = (
+        raster_gwr[
+            row,
+            col
+        ] = (
             x_design
-            @ local_gwr_beta
+            @
+            local_gwr_beta
         )
 
-        raster_gwrc[row, col] = (
+        raster_gwrc[
+            row,
+            col
+        ] = (
             x_design
-            @ local_gwrc_beta
+            @
+            local_gwrc_beta
         )
 
     return (
@@ -871,11 +1184,17 @@ def krige_residuals(
 ):
 
     valid = (
-        np.isfinite(coords[:, 0])
+        np.isfinite(
+            coords[:, 0]
+        )
         &
-        np.isfinite(coords[:, 1])
+        np.isfinite(
+            coords[:, 1]
+        )
         &
-        np.isfinite(residuals)
+        np.isfinite(
+            residuals
+        )
     )
 
     krig_x = coords[
@@ -891,6 +1210,14 @@ def krige_residuals(
     krig_residuals = residuals[
         valid
     ]
+
+    if len(
+        krig_residuals
+    ) < 3:
+
+        raise ValueError(
+            "No existen suficientes residuos válidos para realizar el kriging."
+        )
 
     ok = OrdinaryKriging(
         krig_x,
@@ -1187,7 +1514,9 @@ if run_model:
         st.error(
             "Faltan los siguientes rasters: "
             +
-            ", ".join(missing_rasters)
+            ", ".join(
+                missing_rasters
+            )
         )
 
         st.stop()
@@ -1217,7 +1546,9 @@ if run_model:
         st.error(
             "Faltan columnas en el Excel: "
             +
-            ", ".join(missing_columns)
+            ", ".join(
+                missing_columns
+            )
         )
 
         st.stop()
@@ -1253,6 +1584,7 @@ if run_model:
     )
 
     data["X_proj"] = x_proj
+
     data["Y_proj"] = y_proj
 
     coords = data[
@@ -1277,6 +1609,8 @@ if run_model:
         .astype(float)
     )
 
+    n_points = len(data)
+
     if bw_mode == "Automático (AICc)":
 
         st.info(
@@ -1289,12 +1623,19 @@ if run_model:
             X,
             kernel="bisquare",
             fixed=False,
-            constant=True
+            constant=True,
+            n_jobs=1
         )
 
         bw_opt = selector.search(
             criterion="AICc"
         )
+
+        if np.ndim(bw_opt) != 0:
+
+            bw_opt = np.asarray(
+                bw_opt
+            ).reshape(-1)[0]
 
         bandwidths_to_run = [
             int(bw_opt)
@@ -1324,6 +1665,17 @@ if run_model:
             )
         )
 
+    bandwidths_to_run = [
+        min(
+            max(
+                2,
+                int(bw)
+            ),
+            n_points
+        )
+        for bw in bandwidths_to_run
+    ]
+
     st.write(
         "Bandwidth seleccionado(s):",
         bandwidths_to_run
@@ -1347,7 +1699,9 @@ if run_model:
             )
 
             metrics = (
-                result["results_table"]
+                result[
+                    "results_table"
+                ]
                 .copy()
             )
 
@@ -1357,21 +1711,24 @@ if run_model:
 
         except Exception as e:
 
-    import traceback
+            import traceback
 
-    st.error(
-        f"Error con bandwidth {bandwidth}: {e}"
-    )
+            st.error(
+                f"Error con bandwidth {bandwidth}: {e}"
+            )
 
-    st.code(
-        traceback.format_exc()
-    )
+            st.code(
+                traceback.format_exc()
+            )
+
             st.stop()
 
         progress.progress(
             (i + 1)
             /
-            len(bandwidths_to_run)
+            len(
+                bandwidths_to_run
+            )
         )
 
     if len(all_results) > 1:
@@ -1392,8 +1749,11 @@ if run_model:
 
         best_row = (
             bandwidth_comparison[
-                bandwidth_comparison["Model"]
-                == "GWR"
+                bandwidth_comparison[
+                    "Model"
+                ]
+                ==
+                "GWR"
             ]
             .sort_values(
                 "AICc"
@@ -1402,7 +1762,9 @@ if run_model:
         )
 
         selected_bandwidth = int(
-            best_row["Bandwidth"]
+            best_row[
+                "Bandwidth"
+            ]
         )
 
         st.info(
@@ -1441,13 +1803,15 @@ if run_model:
     col1, col2, col3 = st.columns(3)
 
     gwr_metrics = (
-        results["results_table"]
-        .iloc[0]
+        results[
+            "results_table"
+        ].iloc[0]
     )
 
     gwrc_metrics = (
-        results["results_table"]
-        .iloc[1]
+        results[
+            "results_table"
+        ].iloc[1]
     )
 
     with col1:
@@ -1468,7 +1832,9 @@ if run_model:
 
         corrected_points = int(
             np.sum(
-                results["local_cn"]
+                results[
+                    "local_cn"
+                ]
                 >
                 CN_THRESHOLD
             )
@@ -1510,7 +1876,7 @@ if run_model:
             width,
             height,
             results["coords"],
-            results["gwr_res"].params,
+            results["gwr_params"],
             results["corrected_betas"],
             selected_bandwidth
         )
@@ -1536,7 +1902,9 @@ if run_model:
     )
 
     raster_cn[
-        np.isfinite(raster_gwrc)
+        np.isfinite(
+            raster_gwrc
+        )
     ] = np.nan
 
     st.success(
@@ -1657,6 +2025,7 @@ if run_model:
         lambda_path,
 
         excel_path
+
     ]
 
     zip_path = os.path.join(
@@ -1732,7 +2101,10 @@ if run_model:
             "Descargar resultados Excel",
             data=excel_bytes,
             file_name="GWRCK_results.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
             use_container_width=True
         )
 
@@ -1760,13 +2132,13 @@ if run_model:
 
     st.write(
         """
-        • SOC_GWR_30m.tif  
-        • SOC_GWRC_30m.tif  
-        • Residual_GWRC_Kriged_30m.tif  
-        • Kriging_Variance_30m.tif  
-        • SOC_GWRCK_30m.tif  
-        • CN_Local_30m.tif  
-        • Lambda_Local_30m.tif  
+        • SOC_GWR_30m.tif
+        • SOC_GWRC_30m.tif
+        • Residual_GWRC_Kriged_30m.tif
+        • Kriging_Variance_30m.tif
+        • SOC_GWRCK_30m.tif
+        • CN_Local_30m.tif
+        • Lambda_Local_30m.tif
         • GWRCK_results.xlsx
         """
     )
