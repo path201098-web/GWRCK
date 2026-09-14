@@ -1887,12 +1887,17 @@ if run_model:
             raster_std,
             transform,
             width,
-            height
+            height,
+            valid_counts,
+            n_common
         ) = prepare_rasters(
             uploaded_rasters,
             results["scaler"],
             results["coords"]
         )
+
+    st.write(f"Celdas comunes validas de los 8 predictores: {n_common:,}")
+    st.write(f"Grilla espacial: {width} × {height} celdas de 30 m")
 
     with st.spinner(
         "Calculando predicción espacial GWR y GWRC..."
