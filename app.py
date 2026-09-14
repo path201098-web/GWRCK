@@ -363,7 +363,7 @@ def apply_gwrc(
             corrected_betas[
                 i,
                 1:
-            ] = beta_ridge.flatten()[1:]
+            ] = beta_ridge.flatten()
 
         except np.linalg.LinAlgError:
 
@@ -723,7 +723,8 @@ def run_gwr_gwrc(
 
 
 def prepare_rasters(
-    uploaded_rasters
+    uploaded_rasters,
+    scaler
 ):
 
     raster_arrays = {}
@@ -794,17 +795,25 @@ def prepare_rasters(
             "Revisa CRS, extensión y georreferenciación de los GeoTIFF."
         )
 
+    # IMPORTANTE: los rasters deben estandarizarse con EXACTAMENTE
+    # la misma media y desviacion estandar usadas por StandardScaler
+    # durante el ajuste GWR/GWRC en los 94 puntos.
+    # No se vuelve a ajustar el scaler con los pixeles del raster.
     raster_std = {}
 
-    for var in VARS_MODEL:
+    if not hasattr(scaler, "mean_") or not hasattr(scaler, "scale_"):
+        raise ValueError(
+            "No se encontro el StandardScaler utilizado por GWR/GWRC."
+        )
 
-        arr = raster_arrays[var]
+    for i, var in enumerate(VARS_MODEL):
 
-        mean = np.nanmean(arr)
-        std = np.nanstd(arr)
+        arr = raster_arrays[var].astype(float)
+        mean = float(scaler.mean_[i])
+        std = float(scaler.scale_[i])
 
-        if std == 0 or np.isnan(std):
-            raster_std[var] = np.zeros_like(arr)
+        if std == 0 or not np.isfinite(std):
+            raster_std[var] = np.zeros_like(arr, dtype=float)
         else:
             raster_std[var] = (arr - mean) / std
 
@@ -1798,7 +1807,8 @@ if run_model:
             width,
             height
         ) = prepare_rasters(
-            uploaded_rasters
+            uploaded_rasters,
+            results["scaler"]
         )
 
     with st.spinner(
@@ -1823,6 +1833,18 @@ if run_model:
             selected_bandwidth
         )
 
+    n_gwrc_before_kriging = int(
+        np.sum(np.isfinite(raster_gwrc))
+    )
+
+    if n_gwrc_before_kriging == 0:
+        raise ValueError(
+            "El mismo GWRC calculado no pudo proyectarse al raster. "
+            "SOC_GWRC tiene 0 celdas validas. La causa mas probable era "
+            "la estandarizacion independiente de los rasters; ahora se usa "
+            "el mismo StandardScaler de los 94 puntos."
+        )
+
     with st.spinner(
         "Ejecutando kriging de residuos GWRC y generando el raster de residuos..."
     ):
@@ -1845,6 +1867,16 @@ if run_model:
         raster_gwrc,
         kriged_residual
     )
+
+    n_gwrck_after_raster_calculator = int(
+        np.sum(np.isfinite(raster_gwrck))
+    )
+
+    if n_gwrck_after_raster_calculator == 0:
+        raise ValueError(
+            "La Calculadora Raster produjo 0 celdas validas. "
+            "Verifica la alineacion entre SOC_GWRC y el raster de residuos krigeados."
+        )
 
     point_rows, point_cols = rasterio.transform.rowcol(
         transform,
