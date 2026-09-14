@@ -3,6 +3,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import io
+import tempfile
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -22,17 +23,21 @@ from sklearn.linear_model import LinearRegression
 
 from mgwr.gwr import GWR
 from mgwr.sel_bw import Sel_BW
+
 from scipy.interpolate import griddata
+
+from pykrige.ok import OrdinaryKriging
 
 
 st.set_page_config(
-    page_title="GWR-GWRC Spatial Model",
+    page_title="GWR-GWRC-GWRCK Spatial Model",
     layout="wide"
 )
 
-st.title("GWR-GWRC Spatial Model")
+st.title("GWR-GWRC-GWRCK Spatial Model")
+
 st.write(
-    "GWR → GWRC. Esta versión no incluye kriging."
+    "GWR → GWRC → Kriging de residuos → GWRCK"
 )
 
 
@@ -48,14 +53,16 @@ VARS_MODEL = [
 ]
 
 TARGET_CRS = "EPSG:32717"
+
 CN_THRESHOLD = 25
+
 RESOLUTION = 30.0
 
 
 @st.cache_data(show_spinner=False)
-def save_uploaded_file(uploaded_file):
-
-    import tempfile
+def save_uploaded_file(
+    uploaded_file
+):
 
     suffix = os.path.splitext(
         uploaded_file.name
@@ -67,7 +74,11 @@ def save_uploaded_file(uploaded_file):
 
     os.close(fd)
 
-    with open(path, "wb") as f:
+    with open(
+        path,
+        "wb"
+    ) as f:
+
         f.write(
             uploaded_file.getbuffer()
         )
@@ -92,8 +103,10 @@ def bisquare_weights(
 
     if (
         not np.isfinite(bandwidth)
-        or bandwidth <= 0
+        or
+        bandwidth <= 0
     ):
+
         return w
 
     mask = (
@@ -206,7 +219,9 @@ def calculate_gwrc(
     for i in range(n):
 
         if (
-            np.isfinite(local_CN[i])
+            np.isfinite(
+                local_CN[i]
+            )
             and
             local_CN[i] > CN_THRESHOLD
         ):
@@ -259,7 +274,9 @@ def calculate_gwrc(
                     eig_min
                 )
 
-                if lambda_local <= 0:
+                if (
+                    lambda_local <= 0
+                ):
 
                     lambda_local = 0.001
 
@@ -515,24 +532,6 @@ def run_gwr_gwrc(
         bw_opt
     )
 
-    cn_problem = (
-        local_CN
-        >
-        CN_THRESHOLD
-    )
-
-    n_cn_problem = np.sum(
-        cn_problem
-    )
-
-    pct_cn_problem = (
-        100
-        *
-        n_cn_problem
-        /
-        n
-    )
-
     (
         corrected_betas,
         local_lambda,
@@ -560,6 +559,12 @@ def run_gwr_gwrc(
 
     mae_gwrc = mean_absolute_error(
         y,
+        gwrc_pred
+    )
+
+    residual_gwrc = (
+        y
+        -
         gwrc_pred
     )
 
@@ -680,7 +685,7 @@ def run_gwr_gwrc(
         "SOC_GWRC": gwrc_pred,
 
         "Residual_GWRC":
-            y - gwrc_pred,
+            residual_gwrc,
 
         "CN_Local": local_CN,
 
@@ -729,9 +734,25 @@ def run_gwr_gwrc(
 
             CN_THRESHOLD,
 
-            n_cn_problem,
+            int(
+                np.sum(
+                    local_CN
+                    >
+                    CN_THRESHOLD
+                )
+            ),
 
-            pct_cn_problem,
+            (
+                100
+                *
+                np.sum(
+                    local_CN
+                    >
+                    CN_THRESHOLD
+                )
+                /
+                n
+            ),
 
             np.nanmin(
                 local_CN
@@ -765,7 +786,8 @@ def run_gwr_gwrc(
 
         "gwr_res": gwr_res,
 
-        "gwr_params": gwr_betas,
+        "gwr_params":
+            gwr_betas,
 
         "corrected_betas":
             corrected_betas,
@@ -778,6 +800,9 @@ def run_gwr_gwrc(
 
         "gwr_residuals":
             gwr_residuals,
+
+        "residual_gwrc":
+            residual_gwrc,
 
         "bw_opt":
             bw_opt,
@@ -826,6 +851,7 @@ def run_gwr_gwrc(
 
         "mae_gwrc":
             mae_gwrc
+
     }
 
 
@@ -1284,6 +1310,175 @@ def create_rasters(
         )
     )
 
+    residuals = results[
+        "residual_gwrc"
+    ]
+
+    residual_mask = (
+
+        np.isfinite(
+            coords[:, 0]
+        )
+
+        &
+
+        np.isfinite(
+            coords[:, 1]
+        )
+
+        &
+
+        np.isfinite(
+            residuals
+        )
+
+    )
+
+    krig_x = coords[
+        residual_mask,
+        0
+    ]
+
+    krig_y = coords[
+        residual_mask,
+        1
+    ]
+
+    krig_z = residuals[
+        residual_mask
+    ]
+
+    if len(krig_z) < 3:
+
+        raise ValueError(
+            "No hay suficientes residuos válidos "
+            "para realizar el kriging."
+        )
+
+    kriging_progress = st.progress(
+        0
+    )
+
+    st.write(
+        "Ajustando Ordinary Kriging de los residuos GWRC..."
+    )
+
+    ok = OrdinaryKriging(
+
+        krig_x,
+
+        krig_y,
+
+        krig_z,
+
+        variogram_model="spherical",
+
+        nlags=12,
+
+        weight=False,
+
+        exact_values=True,
+
+        verbose=False
+
+    )
+
+    kriging_progress.progress(
+        0.25
+    )
+
+    valid_grid_x = grid_x[
+        valid_mask
+    ]
+
+    valid_grid_y = grid_y[
+        valid_mask
+    ]
+
+    unique_x = np.unique(
+        valid_grid_x
+    )
+
+    unique_y = np.unique(
+        valid_grid_y
+    )
+
+    residual_kriging_raster = np.full(
+        (
+            height,
+            width
+        ),
+        np.nan,
+        dtype=np.float32
+    )
+
+    st.write(
+        "Interpolando los residuos sobre la malla de 30 m..."
+    )
+
+    try:
+
+        z_kriged, ss_kriged = (
+            ok.execute(
+                "points",
+                valid_grid_x,
+                valid_grid_y
+            )
+        )
+
+        residual_kriging_raster[
+            valid_mask
+        ] = np.asarray(
+            z_kriged,
+            dtype=float
+        ).reshape(-1)
+
+    except Exception:
+
+        z_kriged, ss_kriged = (
+            ok.execute(
+                "grid",
+                unique_x,
+                unique_y
+            )
+        )
+
+        grid_kriged = np.asarray(
+            z_kriged,
+            dtype=float
+        )
+
+        for i, y_value in enumerate(
+            unique_y
+        ):
+
+            row_mask = np.isclose(
+                grid_y,
+                y_value
+            )
+
+            residual_kriging_raster[
+                row_mask
+            ] = grid_kriged[i, :]
+
+    kriging_progress.progress(
+        0.75
+    )
+
+    soc_gwrck_raster = (
+
+        gwrc_raster
+
+        +
+
+        residual_kriging_raster
+
+    )
+
+    kriging_progress.progress(
+        1.0
+    )
+
     profile = {
 
         "driver": "GTiff",
@@ -1306,14 +1501,18 @@ def create_rasters(
 
     }
 
-    import tempfile
-
     output_paths = {}
 
     raster_outputs = {
 
         "SOC_GWRC_30m.tif":
             gwrc_raster,
+
+        "Residual_GWRC_Kriging_30m.tif":
+            residual_kriging_raster,
+
+        "SOC_GWRCK_30m.tif":
+            soc_gwrck_raster,
 
         "CN_Local_30m.tif":
             cn_grid,
@@ -1359,7 +1558,13 @@ def create_rasters(
             filename
         ] = path
 
-    return output_paths
+    return (
+
+        output_paths,
+
+        krig_z
+
+    )
 
 
 st.sidebar.header(
@@ -1416,9 +1621,25 @@ bandwidth = (
     )
 )
 
+st.sidebar.subheader(
+    "Configuración Kriging"
+)
+
+st.sidebar.write(
+    "Ordinary Kriging"
+)
+
+st.sidebar.write(
+    "Semivariograma: Spherical"
+)
+
+st.sidebar.write(
+    "Número de lags: 12"
+)
+
 run_model = (
     st.sidebar.button(
-        "Ejecutar GWR + GWRC",
+        "Ejecutar GWR + GWRC + Kriging",
         type="primary",
         use_container_width=True
     )
@@ -1466,7 +1687,7 @@ if not run_model:
     st.info(
 
         "Carga todos los rasters y pulsa "
-        "'Ejecutar GWR + GWRC'."
+        "'Ejecutar GWR + GWRC + Kriging'."
 
     )
 
@@ -1766,11 +1987,31 @@ try:
 
     )
 
+    st.subheader(
+        "Kriging de residuos GWRC"
+    )
+
+    st.write(
+        "Residuo utilizado:"
+    )
+
+    st.latex(
+        r"Residual_{GWRC}=SOC_{observado}-SOC_{GWRC}"
+    )
+
+    st.write(
+        "Modelo de interpolación: "
+        "**Ordinary Kriging con semivariograma spherical**."
+    )
+
     with st.spinner(
-        "Generando raster GWRC..."
+        "Generando GWRC, kriging de residuos y GWRCK..."
     ):
 
-        output_paths = create_rasters(
+        (
+            output_paths,
+            kriged_residual_values
+        ) = create_rasters(
 
             data,
 
@@ -1781,14 +2022,139 @@ try:
         )
 
     st.success(
-        "Rasters generados correctamente."
+        "GWRC + kriging de residuos + GWRCK generados correctamente."
     )
 
     st.subheader(
-        "Descargas"
+        "Resultados finales"
+    )
+
+    residual_gwrc = result[
+        "residual_gwrc"
+    ]
+
+    residual_kriging_at_points = (
+        kriged_residual_values
+    )
+
+    gwrck_point = (
+        result["gwrc_pred"]
+        +
+        residual_kriging_at_points
+    )
+
+    r2_gwrck = r2_score(
+        data["SOC"].values,
+        gwrck_point
+    )
+
+    rmse_gwrck = np.sqrt(
+        mean_squared_error(
+            data["SOC"].values,
+            gwrck_point
+        )
+    )
+
+    mae_gwrck = mean_absolute_error(
+        data["SOC"].values,
+        gwrck_point
+    )
+
+    col1, col2, col3 = st.columns(
+        3
+    )
+
+    with col1:
+
+        st.metric(
+
+            "GWRCK R²",
+
+            f"{r2_gwrck:.4f}"
+
+        )
+
+    with col2:
+
+        st.metric(
+
+            "GWRCK RMSE",
+
+            f"{rmse_gwrck:.4f}"
+
+        )
+
+    with col3:
+
+        st.metric(
+
+            "GWRCK MAE",
+
+            f"{mae_gwrck:.4f}"
+
+        )
+
+    gwrck_metrics = pd.DataFrame({
+
+        "Modelo": [
+            "GWR",
+            "GWRC",
+            "GWRCK"
+        ],
+
+        "R2": [
+            result["r2_gwr"],
+            result["r2_gwrc"],
+            r2_gwrck
+        ],
+
+        "RMSE": [
+            result["rmse_gwr"],
+            result["rmse_gwrc"],
+            rmse_gwrck
+        ],
+
+        "MAE": [
+            result["mae_gwr"],
+            result["mae_gwrc"],
+            mae_gwrck
+        ]
+
+    })
+
+    st.dataframe(
+
+        gwrck_metrics,
+
+        use_container_width=True,
+
+        hide_index=True
+
     )
 
     excel_buffer = io.BytesIO()
+
+    result["residual_table"][
+        "Residual_Kriging"
+    ] = (
+        residual_kriging_at_points
+    )
+
+    result["residual_table"][
+        "SOC_GWRCK"
+    ] = (
+        gwrck_point
+    )
+
+    result["residual_table"][
+        "Residual_GWRCK"
+    ] = (
+
+        data["SOC"].values
+        -
+        gwrck_point
+
+    )
 
     with pd.ExcelWriter(
 
@@ -1803,6 +2169,16 @@ try:
             writer,
 
             sheet_name="Modelos",
+
+            index=False
+
+        )
+
+        gwrck_metrics.to_excel(
+
+            writer,
+
+            sheet_name="GWR_GWRC_GWRCK",
 
             index=False
 
@@ -1842,7 +2218,7 @@ try:
 
             writer,
 
-            sheet_name="Predicciones",
+            sheet_name="Residuos_GWRC_GWRCK",
 
             index=False
 
@@ -1860,11 +2236,13 @@ try:
 
     st.download_button(
 
-        "Descargar RESULTADOS_GWR_GWRC.xlsx",
+        "Descargar RESULTADOS_GWR_GWRC_GWRCK.xlsx",
 
         data=excel_buffer.getvalue(),
 
-        file_name="RESULTADOS_GWR_GWRC.xlsx",
+        file_name=(
+            "RESULTADOS_GWR_GWRC_GWRCK.xlsx"
+        ),
 
         mime=(
             "application/vnd.openxmlformats-officedocument."
