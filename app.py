@@ -361,9 +361,9 @@ def apply_gwrc(
             )
 
             corrected_betas[
-                i,
-                1:
-            ] = beta_ridge.flatten()
+    i,
+    1:
+] = beta_ridge.flatten()[1:]
 
         except np.linalg.LinAlgError:
 
