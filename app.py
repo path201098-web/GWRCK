@@ -1169,7 +1169,7 @@ def krige_residuals(
         kx,
         ky,
         z_scaled,
-        variogram_model="spherical",
+        variogram_model="gaussian",
         nlags=15,
         verbose=False,
         enable_plotting=False,
@@ -1182,7 +1182,9 @@ def krige_residuals(
     kriged_scaled, variance = ok.execute(
         "grid",
         increasing_x,
-        increasing_y
+        increasing_y,
+        n_closest_points=12,
+        backend="loop"
     )
 
     if np.ma.isMaskedArray(kriged_scaled):
