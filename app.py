@@ -1220,6 +1220,14 @@ def krige_residuals(
             f"límite de control: {allowed_max:.6f}."
         )
 
+    expected_shape = (len(grid_y), len(grid_x))
+
+    if kriged.shape != expected_shape:
+        raise ValueError(
+            "El raster de residuos krigeados no coincide con la grilla de 30 m. "
+            f"Forma esperada: {expected_shape}; forma obtenida: {kriged.shape}."
+        )
+
     return kriged, variance
 
 def create_geotiff(
@@ -1240,9 +1248,16 @@ def create_geotiff(
         "dtype": "float32",
         "crs": TARGET_CRS,
         "transform": transform,
-        "nodata": np.nan,
+        "nodata": -9999.0,
         "compress": "deflate"
     }
+
+    output_array = np.asarray(
+        array,
+        dtype=np.float32
+    ).copy()
+
+    output_array[~np.isfinite(output_array)] = -9999.0
 
     with rasterio.open(
         output_path,
@@ -1251,9 +1266,7 @@ def create_geotiff(
     ) as dst:
 
         dst.write(
-            array.astype(
-                np.float32
-            ),
+            output_array,
             1
         )
 
@@ -1998,6 +2011,10 @@ if run_model:
 
     st.write(
         f"Celdas válidas SOC_GWRCK: {n_gwrck_raster:,}"
+    )
+
+    st.write(
+        f"Grilla GWRCK: {width} × {height} celdas, resolución {RASTER_RESOLUTION:.0f} m × {RASTER_RESOLUTION:.0f} m"
     )
 
     st.write(
