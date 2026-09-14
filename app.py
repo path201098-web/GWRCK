@@ -730,9 +730,10 @@ def prepare_rasters(
 
     raster_arrays = {}
 
-    # UNA SOLA GRILLA COMUN para todos los GeoTIFF.
-    # La extensión incluye todos los rasters y los 94 puntos observados.
-    # Esto evita perder puntos por usar la extensión de un solo raster.
+    # UNA SOLA GRILLA COMUN DE 30 m PARA TODOS LOS RASTERS.
+    # Se utiliza la INTERSECCION de las extensiones, no la union.
+    # Esto evita crear grandes zonas sin datos donde no existe cobertura
+    # simultanea de los 8 predictores.
     bounds_target = []
 
     for var in VARS_MODEL:
@@ -753,23 +754,31 @@ def prepare_rasters(
                 )
             )
 
-    raster_left = min(b[0] for b in bounds_target)
-    raster_bottom = min(b[1] for b in bounds_target)
-    raster_right = max(b[2] for b in bounds_target)
-    raster_top = max(b[3] for b in bounds_target)
+    # Interseccion espacial de los 8 predictores.
+    left = max(b[0] for b in bounds_target)
+    bottom = max(b[1] for b in bounds_target)
+    right = min(b[2] for b in bounds_target)
+    top = min(b[3] for b in bounds_target)
 
-    point_left = float(np.min(coords[:, 0]))
-    point_right = float(np.max(coords[:, 0]))
-    point_bottom = float(np.min(coords[:, 1]))
-    point_top = float(np.max(coords[:, 1]))
+    if left >= right or bottom >= top:
+        raise ValueError(
+            "Los 8 rasters no presentan una interseccion espacial comun "
+            "en EPSG:32717."
+        )
 
-    left = min(raster_left, point_left)
-    right = max(raster_right, point_right)
-    bottom = min(raster_bottom, point_bottom)
-    top = max(raster_top, point_top)
+    # Grilla estrictamente de 30 x 30 m.
+    width = int(np.floor((right - left) / RASTER_RESOLUTION))
+    height = int(np.floor((top - bottom) / RASTER_RESOLUTION))
 
-    width = int(np.ceil((right - left) / RASTER_RESOLUTION))
-    height = int(np.ceil((top - bottom) / RASTER_RESOLUTION))
+    if width <= 0 or height <= 0:
+        raise ValueError(
+            "La interseccion de los rasters no permite construir una grilla de 30 m."
+        )
+
+    # Se centra la grilla dentro de la interseccion real.
+    left = left + 0.5 * ((right - left) - width * RASTER_RESOLUTION)
+    bottom = bottom + 0.5 * ((top - bottom) - height * RASTER_RESOLUTION)
+    top = bottom + height * RASTER_RESOLUTION
 
     transform = from_origin(
         left,
@@ -809,22 +818,49 @@ def prepare_rasters(
 
             raster_arrays[var] = destination
 
-    # Comprobar que la grilla común realmente contiene información.
+    # Comprobacion individual y conjunta de la grilla.
     valid_counts = {
         var: int(np.sum(np.isfinite(raster_arrays[var])))
         for var in VARS_MODEL
     }
 
-    if min(valid_counts.values()) == 0:
+    common_valid = np.ones((height, width), dtype=bool)
+    for var in VARS_MODEL:
+        common_valid &= np.isfinite(raster_arrays[var])
+
+    n_common = int(np.sum(common_valid))
+
+    if n_common == 0:
         raise ValueError(
-            "Los rasters no se superponen correctamente en la grilla EPSG:32717. "
-            "Revisa CRS, extensión y georreferenciación de los GeoTIFF."
+            "La grilla comun de 30 m no contiene celdas donde los 8 predictores "
+            "sean validos simultaneamente. Revisa las extensiones y NoData."
         )
 
-    # IMPORTANTE: los rasters deben estandarizarse con EXACTAMENTE
-    # la misma media y desviacion estandar usadas por StandardScaler
-    # durante el ajuste GWR/GWRC en los 94 puntos.
-    # No se vuelve a ajustar el scaler con los pixeles del raster.
+    # Verificar que los puntos observados queden dentro de la grilla comun.
+    point_rows, point_cols = rasterio.transform.rowcol(
+        transform,
+        coords[:, 0],
+        coords[:, 1]
+    )
+
+    point_rows = np.asarray(point_rows, dtype=int)
+    point_cols = np.asarray(point_cols, dtype=int)
+
+    inside = (
+        (point_rows >= 0)
+        & (point_rows < height)
+        & (point_cols >= 0)
+        & (point_cols < width)
+    )
+
+    if int(np.sum(inside)) < len(coords):
+        raise ValueError(
+            f"La grilla comun de 30 m contiene {int(np.sum(inside))}/{len(coords)} "
+            "puntos observados. No se continua para evitar construir un GWRCK "
+            "incompleto."
+        )
+
+    # IMPORTANTE: mismo StandardScaler utilizado por GWR/GWRC.
     raster_std = {}
 
     if not hasattr(scaler, "mean_") or not hasattr(scaler, "scale_"):
@@ -848,8 +884,11 @@ def prepare_rasters(
         raster_std,
         transform,
         width,
-        height
+        height,
+        valid_counts,
+        n_common
     )
+
 
 def predict_raster_gwr_gwrc(
     raster_std,
