@@ -672,7 +672,7 @@ def run_gwr_gwrc(
 
         "Y": data["Y"].values,
 
-        "SOC_Observed": y_gwr,
+        "SOC_Observed": y_gwr.ravel(),
 
         "SOC_GWR": gwr_pred,
 
