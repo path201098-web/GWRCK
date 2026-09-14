@@ -626,9 +626,7 @@ if st.button(
             constant=True
         )
 
-        gwr_res = gwr_model.fit(
-            n_jobs=1
-        )
+        gwr_res = gwr_model.fit()
 
         gwr_pred = np.asarray(
             gwr_res.predy
