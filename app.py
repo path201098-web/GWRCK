@@ -1357,10 +1357,15 @@ if run_model:
 
         except Exception as e:
 
-            st.error(
-                f"Error con bandwidth {bandwidth}: {e}"
-            )
+    import traceback
 
+    st.error(
+        f"Error con bandwidth {bandwidth}: {e}"
+    )
+
+    st.code(
+        traceback.format_exc()
+    )
             st.stop()
 
         progress.progress(
