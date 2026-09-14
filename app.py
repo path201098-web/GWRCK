@@ -1132,42 +1132,52 @@ def krige_residuals(
 
     krig_x = np.asarray(coords[valid, 0], dtype=float)
     krig_y = np.asarray(coords[valid, 1], dtype=float)
-    krig_residuals = np.asarray(residuals[valid], dtype=float)
+    z = np.asarray(residuals[valid], dtype=float)
 
-    if len(krig_residuals) < 3:
+    if len(z) < 3:
         raise ValueError(
             "No existen suficientes residuos válidos para realizar el kriging."
         )
 
-    # Evita que valores extremos o un ajuste automático inestable del
-    # variograma produzcan superficies numéricamente explosivas.
-    z_scale = float(np.nanstd(krig_residuals))
-    z_mean = float(np.nanmean(krig_residuals))
+    z_mean = float(np.mean(z))
+    z_std = float(np.std(z))
 
-    if not np.isfinite(z_scale) or z_scale <= 0:
+    if not np.isfinite(z_std) or z_std <= 0:
         return (
             np.full((len(grid_y), len(grid_x)), z_mean, dtype=float),
             np.zeros((len(grid_y), len(grid_x)), dtype=float)
         )
 
-    # Escalado únicamente para la estabilidad numérica del kriging.
-    # La predicción final se devuelve en las unidades originales del SOC.
-    z_scaled = (krig_residuals - z_mean) / z_scale
+    # Se centran y escalan las coordenadas únicamente para mejorar
+    # la estabilidad numérica del sistema de kriging. Las predicciones
+    # permanecen en las unidades originales del residuo.
+    x0 = float(np.mean(krig_x))
+    y0 = float(np.mean(krig_y))
+    coord_scale = 1000.0
 
-    # Variograma lineal: evita los parámetros sill/range extremos que pueden
-    # generar valores absurdamente grandes con el ajuste automático.
+    kx = (krig_x - x0) / coord_scale
+    ky = (krig_y - y0) / coord_scale
+    gx = (np.asarray(grid_x, dtype=float) - x0) / coord_scale
+    gy = (np.asarray(grid_y, dtype=float) - y0) / coord_scale
+
+    # Estandarización del residuo para evitar problemas de escala.
+    z_scaled = (z - z_mean) / z_std
+
+    # Ordinary Kriging sobre los residuos. Se mantiene el modelo esférico,
+    # que es el utilizado en el flujo espacial del GWRCK.
     ok = OrdinaryKriging(
-        krig_x,
-        krig_y,
+        kx,
+        ky,
         z_scaled,
-        variogram_model="linear",
+        variogram_model="spherical",
+        nlags=15,
         verbose=False,
         enable_plotting=False,
         coordinates_type="euclidean"
     )
 
-    increasing_x = np.sort(np.asarray(grid_x, dtype=float))
-    increasing_y = np.sort(np.asarray(grid_y, dtype=float))
+    increasing_x = np.sort(gx)
+    increasing_y = np.sort(gy)
 
     kriged_scaled, variance = ok.execute(
         "grid",
@@ -1184,22 +1194,31 @@ def krige_residuals(
     kriged_scaled = np.asarray(kriged_scaled, dtype=float)
     variance = np.asarray(variance, dtype=float)
 
-    # Volver a unidades originales.
-    kriged = kriged_scaled * z_scale + z_mean
+    kriged = kriged_scaled * z_std + z_mean
 
-    # Si por alguna razón PyKrige devuelve valores no finitos, no permitir
-    # que entren en la Calculadora Raster.
-    kriged[~np.isfinite(kriged)] = np.nan
-    variance[~np.isfinite(variance)] = np.nan
-
-    # La grilla geográfica del GeoTIFF tiene Y descendente (top -> bottom),
-    # mientras que PyKrige recibe Y creciente. Se invierte verticalmente.
+    # La grilla de GeoTIFF tiene Y descendente y PyKrige devuelve Y creciente.
     if len(grid_y) > 1 and grid_y[0] > grid_y[-1]:
         kriged = np.flipud(kriged)
         variance = np.flipud(variance)
 
-    return kriged, variance
+    kriged[~np.isfinite(kriged)] = np.nan
+    variance[~np.isfinite(variance)] = np.nan
 
+    # Control explícito de inestabilidad numérica. No se reemplazan valores
+    # con vecinos ni se altera el modelo; simplemente se detiene el proceso
+    # si el kriging genera una magnitud físicamente/numericamente anómala.
+    z_abs_max = float(np.max(np.abs(z)))
+    allowed_max = max(10.0 * z_abs_max, 1.0)
+
+    if np.any(np.isfinite(kriged) & (np.abs(kriged) > allowed_max)):
+        raise ValueError(
+            "El Ordinary Kriging de residuos produjo valores numéricamente "
+            "inestables. Se detuvo la suma raster para evitar un GWRCK inválido. "
+            f"Máximo residuo observado: {z_abs_max:.6f}; "
+            f"límite de control: {allowed_max:.6f}."
+        )
+
+    return kriged, variance
 
 def create_geotiff(
     array,
@@ -1888,6 +1907,15 @@ if run_model:
             "Verifica la alineacion entre SOC_GWRC y el raster de residuos krigeados."
         )
 
+    # Extraer del TIFF krigeado el valor de residuo correspondiente a cada
+    # punto observado. Este es el paso solicitado para construir el GWRCK
+    # puntual:
+    #
+    # SOC_GWRCK(punto) = SOC_GWRC(punto) + Residual_GWRC_Kriged(punto)
+    #
+    # El SOC_GWRC del punto proviene directamente del GWRC original de los
+    # 94 puntos, mientras que el residuo proviene del raster generado por
+    # Ordinary Kriging.
     point_rows, point_cols = rasterio.transform.rowcol(
         transform,
         results["coords"][:, 0],
@@ -1897,33 +1925,43 @@ if run_model:
     point_rows = np.asarray(point_rows, dtype=int)
     point_cols = np.asarray(point_cols, dtype=int)
 
-    valid_extract = (
+    valid_location = (
         (point_rows >= 0)
-        & (point_rows < raster_gwrck.shape[0])
+        & (point_rows < kriged_residual.shape[0])
         & (point_cols >= 0)
-        & (point_cols < raster_gwrck.shape[1])
+        & (point_cols < kriged_residual.shape[1])
     )
 
-    # Además de estar dentro de la extensión, el punto debe caer sobre una
-    # celda válida del TIFF final. Esto garantiza que la evaluación usa
-    # exactamente SOC_GWRCK = SOC_GWRC + Residual_GWRC_Kriged.
-    valid_extract &= np.where(
-        valid_extract,
-        np.isfinite(raster_gwrck[point_rows.clip(0, raster_gwrck.shape[0]-1),
-                                  point_cols.clip(0, raster_gwrck.shape[1]-1)]),
-        False
+    residual_kriged_points = np.full(
+        len(results["coords"]),
+        np.nan,
+        dtype=float
     )
 
+    residual_kriged_points[valid_location] = kriged_residual[
+        point_rows[valid_location],
+        point_cols[valid_location]
+    ]
+
+    # GWRCK puntual construido después de crear el raster krigeado.
+    # No se krigean directamente los puntos.
     gwrck_extracted = np.full(
         len(results["coords"]),
         np.nan,
         dtype=float
     )
 
-    gwrck_extracted[valid_extract] = raster_gwrck[
-        point_rows[valid_extract],
-        point_cols[valid_extract]
-    ]
+    valid_extract = (
+        valid_location
+        & np.isfinite(residual_kriged_points)
+        & np.isfinite(results["gwrc_pred"])
+    )
+
+    gwrck_extracted[valid_extract] = (
+        results["gwrc_pred"][valid_extract]
+        +
+        residual_kriged_points[valid_extract]
+    )
 
     observed = data["SOC"].values.astype(float)
 
@@ -1961,7 +1999,12 @@ if run_model:
     )
 
     st.write(
-        f"Puntos con SOC_GWRCK extraído: "
+        f"Puntos con Residual_GWRC_Kriged extraído: "
+        f"{int(np.sum(np.isfinite(residual_kriged_points)))}/{len(observed)}"
+    )
+
+    st.write(
+        f"Puntos con SOC_GWRCK calculado: "
         f"{n_gwrck_points}/{len(observed)}"
     )
 
@@ -1989,17 +2032,6 @@ if run_model:
         gwrck_r2 = np.nan
         gwrck_rmse = np.nan
         gwrck_mae = np.nan
-
-    residual_kriged_points = np.full(
-        len(results["coords"]),
-        np.nan,
-        dtype=float
-    )
-
-    residual_kriged_points[valid_extract] = kriged_residual[
-        point_rows[valid_extract],
-        point_cols[valid_extract]
-    ]
 
     final_point_table = pd.DataFrame({
         "X": data["X"].values,
