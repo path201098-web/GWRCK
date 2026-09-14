@@ -1252,11 +1252,12 @@ def create_rasters(
     progress.progress(
         1.0
     )
-
-   grid_points = np.asarray(
-    coords
-)
-
+        grid_points = np.column_stack(
+            [
+                coords[:, 0],
+                coords[:, 1]
+            ]
+        )
     grid_coordinates = np.column_stack(
 
         [
