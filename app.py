@@ -418,8 +418,6 @@ def run_gwr_gwrc(
         .values
         .astype(float)
     )
-    y_gwr_1d = y_gwr.copy()
-    y_gwr = y_gwr.reshape((-1, 1))
 
     y_gwr_2d = y_gwr.reshape((-1, 1))
 
@@ -449,6 +447,7 @@ def run_gwr_gwrc(
         fixed=False,
         kernel="bisquare",
         constant=True,
+        n_jobs=1
     )
 
     gwr_res = gwr_model.fit()
@@ -497,7 +496,7 @@ def run_gwr_gwrc(
     )
 
     gwr_r2 = r2_score(
-        y_gwr_1d,
+        y_gwr,
         gwr_pred
     )
 
@@ -509,7 +508,7 @@ def run_gwr_gwrc(
     )
 
     gwr_mae = mean_absolute_error(
-        y_gwr_1d,
+        y_gwr,
         gwr_pred
     )
 
@@ -560,7 +559,7 @@ def run_gwr_gwrc(
     )
 
     gwrc_r2 = r2_score(
-        y_gwr_1d,
+        y_gwr,
         gwrc_pred
     )
 
@@ -572,7 +571,7 @@ def run_gwr_gwrc(
     )
 
     gwrc_mae = mean_absolute_error(
-        y_gwr_1d,
+        y_gwr,
         gwrc_pred
     )
 
@@ -674,7 +673,7 @@ def run_gwr_gwrc(
 
         "Y": data["Y"].values,
 
-        "SOC_Observed": y_gwr_1d,
+        "SOC_Observed": y_gwr,
 
         "SOC_GWR": gwr_pred,
 
@@ -1073,27 +1072,6 @@ def predict_raster_gwr_gwrc(
             weight_sum
         )
 
-        local_X = X_gwr[selected]
-        weighted_X = local_X * np.sqrt(weights[:, None])
-        XtWX_local = weighted_X.T @ weighted_X
-        eigvals_local = np.real(np.linalg.eigvalsh(XtWX_local))
-        eig_max_local = np.max(eigvals_local)
-        eig_min_local = np.min(eigvals_local)
-
-        if eig_min_local <= 0 or eig_max_local <= 0:
-            local_cn_value = np.inf
-        else:
-            local_cn_value = np.sqrt(eig_max_local / eig_min_local)
-
-        raster_cn[row, col] = local_cn_value
-
-        if local_cn_value > CN_THRESHOLD and eig_min_local > 0:
-            local_lambda = max(0.01 * eig_min_local, 0.001)
-        else:
-            local_lambda = 0.0
-
-        raster_lambda[row, col] = local_lambda
-
         local_gwr_beta = (
             weights[:, None]
             *
@@ -1188,49 +1166,25 @@ def krige_residuals(
             "No existen suficientes residuos válidos para realizar el kriging."
         )
 
-    if np.nanstd(krig_residuals) == 0:
-        kriged = np.full(
-            (len(grid_y), len(grid_x)),
-            float(np.nanmean(krig_residuals)),
-            dtype=float
-        )
-        variance = np.zeros_like(kriged, dtype=float)
-        return kriged, variance
+    ok = OrdinaryKriging(
+        krig_x,
+        krig_y,
+        krig_residuals,
+        variogram_model="spherical",
+        verbose=False,
+        enable_plotting=False,
+        coordinates_type="euclidean"
+    )
 
-    increasing_y = np.sort(np.asarray(grid_y, dtype=float))
+    increasing_y = np.sort(
+        grid_y
+    )
 
-    try:
-        ok = OrdinaryKriging(
-            krig_x,
-            krig_y,
-            krig_residuals,
-            variogram_model="spherical",
-            verbose=False,
-            enable_plotting=False,
-            exact_values=True,
-            coordinates_type="euclidean"
-        )
-        kriged, variance = ok.execute(
-            "grid",
-            grid_x,
-            increasing_y
-        )
-    except Exception:
-        ok = OrdinaryKriging(
-            krig_x,
-            krig_y,
-            krig_residuals,
-            variogram_model="linear",
-            verbose=False,
-            enable_plotting=False,
-            exact_values=True,
-            coordinates_type="euclidean"
-        )
-        kriged, variance = ok.execute(
-            "grid",
-            grid_x,
-            increasing_y
-        )
+    kriged, variance = ok.execute(
+        "grid",
+        grid_x,
+        increasing_y
+    )
 
     kriged = np.asarray(
         kriged,
@@ -1345,11 +1299,12 @@ def create_results_excel(
         )
 
         if "final_point_table" in results:
+
             results[
                 "final_point_table"
             ].to_excel(
                 writer,
-                sheet_name="GWRCK_Final_Points",
+                sheet_name="GWRCK_Points",
                 index=False
             )
 
@@ -1480,7 +1435,7 @@ if bw_mode == "Rango":
 run_model = st.button(
     "Ejecutar GWRCK",
     type="primary",
-    width="stretch"
+    use_container_width=True
 )
 
 
@@ -1610,9 +1565,11 @@ if run_model:
             .astype(float)
         )
 
+        y_auto_2d = y_auto.reshape((-1, 1))
+
         selector = Sel_BW(
             coords_auto,
-            y_auto.reshape((-1, 1)),
+            y_auto_2d,
             X_auto,
             kernel="bisquare",
             fixed=False,
@@ -1756,7 +1713,7 @@ if run_model:
 
         st.dataframe(
             bandwidth_comparison,
-            width="stretch"
+            use_container_width=True
         )
 
         best_row = (
@@ -1811,7 +1768,7 @@ if run_model:
 
     st.dataframe(
         results["results_table"],
-        width="stretch"
+        use_container_width=True
     )
 
     col1, col2, col3 = st.columns(3)
@@ -1924,70 +1881,94 @@ if run_model:
     point_rows = np.asarray(point_rows, dtype=int)
     point_cols = np.asarray(point_cols, dtype=int)
 
-    valid_point_extract = (
+    valid_extract = (
         (point_rows >= 0)
-        & (point_rows < height)
+        & (point_rows < raster_gwrck.shape[0])
         & (point_cols >= 0)
-        & (point_cols < width)
+        & (point_cols < raster_gwrck.shape[1])
     )
 
     gwrck_extracted = np.full(
-        len(data),
+        len(results["coords"]),
         np.nan,
         dtype=float
     )
 
-    gwrck_extracted[valid_point_extract] = raster_gwrck[
-        point_rows[valid_point_extract],
-        point_cols[valid_point_extract]
+    gwrck_extracted[valid_extract] = raster_gwrck[
+        point_rows[valid_extract],
+        point_cols[valid_extract]
     ]
 
-    y_eval = data["SOC"].values.astype(float)
-    valid_eval = np.isfinite(gwrck_extracted) & np.isfinite(y_eval)
+    observed = data["SOC"].values.astype(float)
 
-    if np.sum(valid_eval) < 2:
-        raise ValueError(
-            "No hay suficientes valores válidos del raster GWRCK para calcular las métricas finales."
+    valid_metrics = (
+        np.isfinite(observed)
+        & np.isfinite(gwrck_extracted)
+    )
+
+    if np.sum(valid_metrics) >= 2:
+
+        gwrck_r2 = r2_score(
+            observed[valid_metrics],
+            gwrck_extracted[valid_metrics]
         )
 
-    gwrck_r2 = r2_score(
-        y_eval[valid_eval],
-        gwrck_extracted[valid_eval]
-    )
-    gwrck_rmse = np.sqrt(
-        mean_squared_error(
-            y_eval[valid_eval],
-            gwrck_extracted[valid_eval]
+        gwrck_rmse = np.sqrt(
+            mean_squared_error(
+                observed[valid_metrics],
+                gwrck_extracted[valid_metrics]
+            )
         )
-    )
-    gwrck_mae = mean_absolute_error(
-        y_eval[valid_eval],
-        gwrck_extracted[valid_eval]
+
+        gwrck_mae = mean_absolute_error(
+            observed[valid_metrics],
+            gwrck_extracted[valid_metrics]
+        )
+
+    else:
+
+        gwrck_r2 = np.nan
+        gwrck_rmse = np.nan
+        gwrck_mae = np.nan
+
+    residual_kriged_points = np.full(
+        len(results["coords"]),
+        np.nan,
+        dtype=float
     )
 
-    gwrck_metrics = pd.DataFrame({
+    residual_kriged_points[valid_extract] = kriged_residual[
+        point_rows[valid_extract],
+        point_cols[valid_extract]
+    ]
+
+    final_point_table = pd.DataFrame({
+        "X": data["X"].values,
+        "Y": data["Y"].values,
+        "SOC_Observed": observed,
+        "SOC_GWRC": results["gwrc_pred"],
+        "Residual_GWRC": results["gwrc_residuals"],
+        "Residual_GWRC_Kriged": residual_kriged_points,
+        "SOC_GWRCK_Extracted": gwrck_extracted
+    })
+
+    gwrck_metrics_row = pd.DataFrame({
         "Model": ["GWRCK"],
-        "N": [int(np.sum(valid_eval))],
+        "N": [int(np.sum(valid_metrics))],
         "Variables": [len(VARS_MODEL)],
         "Bandwidth": [selected_bandwidth],
         "R2": [gwrck_r2],
         "RMSE": [gwrck_rmse],
-        "MAE": [gwrck_mae]
+        "MAE": [gwrck_mae],
+        "AIC": [np.nan],
+        "AICc": [np.nan]
     })
 
-    final_results_table = pd.concat(
-        [results["results_table"], gwrck_metrics],
+    results["results_table"] = pd.concat(
+        [results["results_table"], gwrck_metrics_row],
         ignore_index=True
     )
-    results["results_table"] = final_results_table
 
-    results["gwrck_extracted"] = gwrck_extracted
-
-    final_point_table = results["residual_table"].copy()
-    final_point_table["Residual_GWRC_Kriged"] = (
-        gwrck_extracted - results["gwrc_pred"]
-    )
-    final_point_table["SOC_GWRCK_Extracted"] = gwrck_extracted
     results["final_point_table"] = final_point_table
 
     st.success(
@@ -1995,28 +1976,44 @@ if run_model:
     )
 
     st.subheader(
-        "Resultados finales GWRCK"
-    )
-
-    st.dataframe(
-        results["results_table"],
-        width="stretch"
-    )
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("GWRCK R²", f"{gwrck_r2:.4f}")
-    with col2:
-        st.metric("GWRCK RMSE", f"{gwrck_rmse:.4f}")
-    with col3:
-        st.metric("GWRCK MAE", f"{gwrck_mae:.4f}")
-
-    st.subheader(
         "Estructura final del GWRCK"
     )
 
     st.code(
         "SOC_GWRCK = SOC_GWRC + Kriged_Residual_GWRC"
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+
+        st.metric(
+            "GWRCK R²",
+            f"{gwrck_r2:.4f}"
+        )
+
+    with col2:
+
+        st.metric(
+            "GWRCK RMSE",
+            f"{gwrck_rmse:.4f}"
+        )
+
+    with col3:
+
+        st.metric(
+            "GWRCK MAE",
+            f"{gwrck_mae:.4f}"
+        )
+
+    st.subheader(
+        "Predicciones GWRCK en los puntos observados"
+    )
+
+    st.dataframe(
+        final_point_table,
+        use_container_width=True,
+        hide_index=True
     )
 
     temp_dir = tempfile.mkdtemp()
@@ -2177,7 +2174,7 @@ if run_model:
             data=gwrc_bytes,
             file_name="SOC_GWRC_30m.tif",
             mime="image/tiff",
-            width="stretch"
+            use_container_width=True
         )
 
         st.download_button(
@@ -2185,7 +2182,7 @@ if run_model:
             data=residual_bytes,
             file_name="Residual_GWRC_Kriged_30m.tif",
             mime="image/tiff",
-            width="stretch"
+            use_container_width=True
         )
 
         st.download_button(
@@ -2193,7 +2190,7 @@ if run_model:
             data=excel_bytes,
             file_name="GWRCK_results.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            width="stretch"
+            use_container_width=True
         )
 
     with col2:
@@ -2203,7 +2200,7 @@ if run_model:
             data=gwrck_bytes,
             file_name="SOC_GWRCK_30m.tif",
             mime="image/tiff",
-            width="stretch"
+            use_container_width=True
         )
 
         st.download_button(
@@ -2211,7 +2208,7 @@ if run_model:
             data=zip_bytes,
             file_name="GWRCK_results.zip",
             mime="application/zip",
-            width="stretch"
+            use_container_width=True
         )
 
     st.subheader(
