@@ -8,7 +8,7 @@ import streamlit as st
 import rasterio
 
 from rasterio.transform import from_origin
-from rasterio.warp import reproject, Resampling
+from rasterio.warp import reproject, Resampling, transform_bounds
 
 from pyproj import Transformer
 
@@ -724,33 +724,59 @@ def run_gwr_gwrc(
 
 def prepare_rasters(
     uploaded_rasters,
-    scaler
+    scaler,
+    coords
 ):
 
     raster_arrays = {}
 
-    reference_file = uploaded_rasters[VARS_MODEL[0]]
+    # UNA SOLA GRILLA COMUN para todos los GeoTIFF.
+    # La extensión incluye todos los rasters y los 94 puntos observados.
+    # Esto evita perder puntos por usar la extensión de un solo raster.
+    bounds_target = []
 
-    with rasterio.open(reference_file) as ref:
+    for var in VARS_MODEL:
 
-        if ref.crs is None:
-            raise ValueError(
-                f"El raster {VARS_MODEL[0]} no tiene sistema de coordenadas definido."
+        with rasterio.open(uploaded_rasters[var]) as src:
+
+            if src.crs is None:
+                raise ValueError(
+                    f"El raster {var} no tiene sistema de coordenadas definido."
+                )
+
+            bounds_target.append(
+                transform_bounds(
+                    src.crs,
+                    TARGET_CRS,
+                    *src.bounds,
+                    densify_pts=21
+                )
             )
 
-        # Se construye UNA sola grilla de trabajo en EPSG:32717.
-        # Esta grilla será utilizada por todos los predictores, por GWR/GWRC,
-        # por el kriging de residuos y por la suma raster final.
-        from rasterio.warp import calculate_default_transform
+    raster_left = min(b[0] for b in bounds_target)
+    raster_bottom = min(b[1] for b in bounds_target)
+    raster_right = max(b[2] for b in bounds_target)
+    raster_top = max(b[3] for b in bounds_target)
 
-        transform, width, height = calculate_default_transform(
-            ref.crs,
-            TARGET_CRS,
-            ref.width,
-            ref.height,
-            *ref.bounds,
-            resolution=RASTER_RESOLUTION
-        )
+    point_left = float(np.min(coords[:, 0]))
+    point_right = float(np.max(coords[:, 0]))
+    point_bottom = float(np.min(coords[:, 1]))
+    point_top = float(np.max(coords[:, 1]))
+
+    left = min(raster_left, point_left)
+    right = max(raster_right, point_right)
+    bottom = min(raster_bottom, point_bottom)
+    top = max(raster_top, point_top)
+
+    width = int(np.ceil((right - left) / RASTER_RESOLUTION))
+    height = int(np.ceil((top - bottom) / RASTER_RESOLUTION))
+
+    transform = from_origin(
+        left,
+        top,
+        RASTER_RESOLUTION,
+        RASTER_RESOLUTION
+    )
 
     for var in VARS_MODEL:
 
@@ -1099,97 +1125,80 @@ def krige_residuals(
 ):
 
     valid = (
-        np.isfinite(
-            coords[:, 0]
-        )
-        &
-        np.isfinite(
-            coords[:, 1]
-        )
-        &
-        np.isfinite(
-            residuals
-        )
+        np.isfinite(coords[:, 0])
+        & np.isfinite(coords[:, 1])
+        & np.isfinite(residuals)
     )
 
-    krig_x = coords[
-        valid,
-        0
-    ]
+    krig_x = np.asarray(coords[valid, 0], dtype=float)
+    krig_y = np.asarray(coords[valid, 1], dtype=float)
+    krig_residuals = np.asarray(residuals[valid], dtype=float)
 
-    krig_y = coords[
-        valid,
-        1
-    ]
-
-    krig_residuals = residuals[
-        valid
-    ]
-
-    if len(
-        krig_residuals
-    ) < 3:
-
+    if len(krig_residuals) < 3:
         raise ValueError(
             "No existen suficientes residuos válidos para realizar el kriging."
         )
 
+    # Evita que valores extremos o un ajuste automático inestable del
+    # variograma produzcan superficies numéricamente explosivas.
+    z_scale = float(np.nanstd(krig_residuals))
+    z_mean = float(np.nanmean(krig_residuals))
+
+    if not np.isfinite(z_scale) or z_scale <= 0:
+        return (
+            np.full((len(grid_y), len(grid_x)), z_mean, dtype=float),
+            np.zeros((len(grid_y), len(grid_x)), dtype=float)
+        )
+
+    # Escalado únicamente para la estabilidad numérica del kriging.
+    # La predicción final se devuelve en las unidades originales del SOC.
+    z_scaled = (krig_residuals - z_mean) / z_scale
+
+    # Variograma lineal: evita los parámetros sill/range extremos que pueden
+    # generar valores absurdamente grandes con el ajuste automático.
     ok = OrdinaryKriging(
         krig_x,
         krig_y,
-        krig_residuals,
-        variogram_model="spherical",
+        z_scaled,
+        variogram_model="linear",
         verbose=False,
         enable_plotting=False,
         coordinates_type="euclidean"
     )
 
-    increasing_y = np.sort(
-        grid_y
-    )
+    increasing_x = np.sort(np.asarray(grid_x, dtype=float))
+    increasing_y = np.sort(np.asarray(grid_y, dtype=float))
 
-    kriged, variance = ok.execute(
+    kriged_scaled, variance = ok.execute(
         "grid",
-        grid_x,
+        increasing_x,
         increasing_y
     )
 
-    if np.ma.isMaskedArray(kriged):
-        kriged = np.ma.filled(
-            kriged,
-            np.nan
-        )
+    if np.ma.isMaskedArray(kriged_scaled):
+        kriged_scaled = np.ma.filled(kriged_scaled, np.nan)
 
     if np.ma.isMaskedArray(variance):
-        variance = np.ma.filled(
-            variance,
-            np.nan
-        )
+        variance = np.ma.filled(variance, np.nan)
 
-    kriged = np.asarray(
-        kriged,
-        dtype=float
-    )
+    kriged_scaled = np.asarray(kriged_scaled, dtype=float)
+    variance = np.asarray(variance, dtype=float)
 
-    variance = np.asarray(
-        variance,
-        dtype=float
-    )
+    # Volver a unidades originales.
+    kriged = kriged_scaled * z_scale + z_mean
 
-    if grid_y[0] > grid_y[-1]:
+    # Si por alguna razón PyKrige devuelve valores no finitos, no permitir
+    # que entren en la Calculadora Raster.
+    kriged[~np.isfinite(kriged)] = np.nan
+    variance[~np.isfinite(variance)] = np.nan
 
-        kriged = np.flipud(
-            kriged
-        )
+    # La grilla geográfica del GeoTIFF tiene Y descendente (top -> bottom),
+    # mientras que PyKrige recibe Y creciente. Se invierte verticalmente.
+    if len(grid_y) > 1 and grid_y[0] > grid_y[-1]:
+        kriged = np.flipud(kriged)
+        variance = np.flipud(variance)
 
-        variance = np.flipud(
-            variance
-        )
-
-    return (
-        kriged,
-        variance
-    )
+    return kriged, variance
 
 
 def create_geotiff(
@@ -1808,7 +1817,8 @@ if run_model:
             height
         ) = prepare_rasters(
             uploaded_rasters,
-            results["scaler"]
+            results["scaler"],
+            results["coords"]
         )
 
     with st.spinner(
@@ -1892,6 +1902,16 @@ if run_model:
         & (point_rows < raster_gwrck.shape[0])
         & (point_cols >= 0)
         & (point_cols < raster_gwrck.shape[1])
+    )
+
+    # Además de estar dentro de la extensión, el punto debe caer sobre una
+    # celda válida del TIFF final. Esto garantiza que la evaluación usa
+    # exactamente SOC_GWRCK = SOC_GWRC + Residual_GWRC_Kriged.
+    valid_extract &= np.where(
+        valid_extract,
+        np.isfinite(raster_gwrck[point_rows.clip(0, raster_gwrck.shape[0]-1),
+                                  point_cols.clip(0, raster_gwrck.shape[1]-1)]),
+        False
     )
 
     gwrck_extracted = np.full(
