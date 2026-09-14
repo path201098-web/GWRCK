@@ -1,0 +1,10 @@
+streamlit
+numpy
+pandas
+rasterio
+pyproj
+scikit-learn
+openpyxl
+scipy
+mgwr
+pykrige
