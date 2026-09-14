@@ -728,121 +728,71 @@ def prepare_rasters(
 
     raster_arrays = {}
 
-    bounds = None
+    reference_file = uploaded_rasters[VARS_MODEL[0]]
+
+    with rasterio.open(reference_file) as ref:
+
+        if ref.crs is None:
+            raise ValueError(
+                f"El raster {VARS_MODEL[0]} no tiene sistema de coordenadas definido."
+            )
+
+        # Se construye UNA sola grilla de trabajo en EPSG:32717.
+        # Esta grilla será utilizada por todos los predictores, por GWR/GWRC,
+        # por el kriging de residuos y por la suma raster final.
+        from rasterio.warp import calculate_default_transform
+
+        transform, width, height = calculate_default_transform(
+            ref.crs,
+            TARGET_CRS,
+            ref.width,
+            ref.height,
+            *ref.bounds,
+            resolution=RASTER_RESOLUTION
+        )
 
     for var in VARS_MODEL:
 
-        uploaded_file = (
-            uploaded_rasters[var]
-        )
+        uploaded_file = uploaded_rasters[var]
 
-        with rasterio.open(
-            uploaded_file
-        ) as src:
+        with rasterio.open(uploaded_file) as src:
 
-            left = src.bounds.left
-            bottom = src.bounds.bottom
-            right = src.bounds.right
-            top = src.bounds.top
-
-            if bounds is None:
-
-                bounds = [
-                    left,
-                    bottom,
-                    right,
-                    top
-                ]
-
-            else:
-
-                bounds[0] = min(
-                    bounds[0],
-                    left
+            if src.crs is None:
+                raise ValueError(
+                    f"El raster {var} no tiene sistema de coordenadas definido."
                 )
-
-                bounds[1] = min(
-                    bounds[1],
-                    bottom
-                )
-
-                bounds[2] = max(
-                    bounds[2],
-                    right
-                )
-
-                bounds[3] = max(
-                    bounds[3],
-                    top
-                )
-
-    min_x, min_y, max_x, max_y = (
-        bounds
-    )
-
-    width = int(
-        np.ceil(
-            (
-                max_x - min_x
-            )
-            /
-            RASTER_RESOLUTION
-        )
-    )
-
-    height = int(
-        np.ceil(
-            (
-                max_y - min_y
-            )
-            /
-            RASTER_RESOLUTION
-        )
-    )
-
-    transform = from_origin(
-        min_x,
-        max_y,
-        RASTER_RESOLUTION,
-        RASTER_RESOLUTION
-    )
-
-    for var in VARS_MODEL:
-
-        uploaded_file = (
-            uploaded_rasters[var]
-        )
-
-        with rasterio.open(
-            uploaded_file
-        ) as src:
 
             destination = np.full(
-                (
-                    height,
-                    width
-                ),
+                (height, width),
                 np.nan,
                 dtype=np.float32
             )
 
             reproject(
-                source=rasterio.band(
-                    src,
-                    1
-                ),
+                source=rasterio.band(src, 1),
                 destination=destination,
                 src_transform=src.transform,
                 src_crs=src.crs,
+                src_nodata=src.nodata,
                 dst_transform=transform,
                 dst_crs=TARGET_CRS,
-                resampling=Resampling.bilinear,
-                dst_nodata=np.nan
+                dst_nodata=np.nan,
+                resampling=Resampling.bilinear
             )
 
-            raster_arrays[var] = (
-                destination
-            )
+            raster_arrays[var] = destination
+
+    # Comprobar que la grilla común realmente contiene información.
+    valid_counts = {
+        var: int(np.sum(np.isfinite(raster_arrays[var])))
+        for var in VARS_MODEL
+    }
+
+    if min(valid_counts.values()) == 0:
+        raise ValueError(
+            "Los rasters no se superponen correctamente en la grilla EPSG:32717. "
+            "Revisa CRS, extensión y georreferenciación de los GeoTIFF."
+        )
 
     raster_std = {}
 
@@ -850,29 +800,13 @@ def prepare_rasters(
 
         arr = raster_arrays[var]
 
-        mean = np.nanmean(
-            arr
-        )
+        mean = np.nanmean(arr)
+        std = np.nanstd(arr)
 
-        std = np.nanstd(
-            arr
-        )
-
-        if (
-            std == 0
-            or
-            np.isnan(std)
-        ):
-
-            raster_std[var] = (
-                np.zeros_like(arr)
-            )
-
+        if std == 0 or np.isnan(std):
+            raster_std[var] = np.zeros_like(arr)
         else:
-
-            raster_std[var] = (
-                arr - mean
-            ) / std
+            raster_std[var] = (arr - mean) / std
 
     return (
         raster_arrays,
@@ -881,7 +815,6 @@ def prepare_rasters(
         width,
         height
     )
-
 
 def predict_raster_gwr_gwrc(
     raster_std,
