@@ -839,10 +839,6 @@ def create_rasters(
         "coords"
     ]
 
-    gwr_betas = results[
-        "gwr_params"
-    ]
-
     corrected_betas = results[
         "corrected_betas"
     ]
@@ -1034,15 +1030,6 @@ def create_rasters(
         dtype=np.float32
     )
 
-    gwr_raster = np.full(
-        (
-            height,
-            width
-        ),
-        np.nan,
-        dtype=np.float32
-    )
-
     rows_idx, cols_idx = np.indices(
         (
             height,
@@ -1184,13 +1171,13 @@ def create_rasters(
             np.sum(weights)
         )
 
-        beta_local = (
-            gwr_betas[idx]
+        beta_local_corrected = (
+            corrected_betas[idx]
         )
 
-        beta_gwr = np.sum(
+        beta_gwrc = np.sum(
 
-            beta_local
+            beta_local_corrected
             *
             w_norm[:, None],
 
@@ -1207,36 +1194,11 @@ def create_rasters(
 
         )
 
-        pred_gwr = (
-            x_design
-            @
-            beta_gwr
-        )
-
-        beta_local_corrected = (
-            corrected_betas[idx]
-        )
-
-        beta_gwrc = np.sum(
-
-            beta_local_corrected
-            *
-            w_norm[:, None],
-
-            axis=0
-
-        )
-
         pred_gwrc = (
             x_design
             @
             beta_gwrc
         )
-
-        gwr_raster[
-            r,
-            c
-        ] = pred_gwr
 
         gwrc_raster[
             r,
@@ -1272,9 +1234,6 @@ def create_rasters(
         1.0
     )
 
-    # Corrected grid_points block.
-    # coords is n x 2 and local_CN/local_lambda
-    # contain n values.
     grid_points = np.column_stack(
         [
             coords[:, 0],
@@ -1352,9 +1311,6 @@ def create_rasters(
     output_paths = {}
 
     raster_outputs = {
-
-        "SOC_GWR_30m.tif":
-            gwr_raster,
 
         "SOC_GWRC_30m.tif":
             gwrc_raster,
@@ -1811,7 +1767,7 @@ try:
     )
 
     with st.spinner(
-        "Generando rasters GWR y GWRC..."
+        "Generando raster GWRC..."
     ):
 
         output_paths = create_rasters(
