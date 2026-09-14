@@ -1891,7 +1891,7 @@ if run_model:
         )
 
     with st.spinner(
-        "Ejecutando kriging de residuos GWRC..."
+        "Ejecutando kriging de residuos GWRC y generando el raster de residuos..."
     ):
 
         (
@@ -1904,6 +1904,10 @@ if run_model:
             grid_y
         )
 
+    # El resultado anterior es el raster espacial interpolado de los residuos:
+    # Residual_GWRC_Kriged_30m.tif
+    # Raster Calculator equivalente a:
+    # SOC_GWRCK = SOC_GWRC + Residual_GWRC_Kriged_30m
     raster_gwrck = raster_calculator_add(
         raster_gwrc,
         kriged_residual
