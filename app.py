@@ -1,37 +1,32 @@
 import os
-import zipfile
-import tempfile
+import warnings
+warnings.filterwarnings("ignore")
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 import rasterio
 
-from rasterio.transform import from_origin
 from rasterio.warp import reproject, Resampling
-
+from rasterio.transform import from_origin
 from pyproj import Transformer
 
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import (
-    r2_score,
-    mean_squared_error,
-    mean_absolute_error
-)
 
 from mgwr.gwr import GWR
 from mgwr.sel_bw import Sel_BW
-
-from pykrige.ok import OrdinaryKriging
+from scipy.interpolate import griddata
 
 
 st.set_page_config(
-    page_title="GWRCK Spatial Model",
-    page_icon="🌎",
+    page_title="GWR-GWRC Spatial Model",
     layout="wide"
 )
 
+st.title("GWR-GWRC Spatial Model")
+st.write("GWR → GWRC. Esta versión no incluye kriging.")
 
 VARS_MODEL = [
     "ELEV",
@@ -45,49 +40,30 @@ VARS_MODEL = [
 ]
 
 TARGET_CRS = "EPSG:32717"
-SOURCE_CRS = "EPSG:4326"
-
-RASTER_RESOLUTION = 30.0
-CN_THRESHOLD = 25.0
+CN_THRESHOLD = 25
+RESOLUTION = 30.0
 
 
-def calculate_vif(X, variables):
+@st.cache_data(show_spinner=False)
+def save_uploaded_file(uploaded_file):
+    import tempfile
 
-    vif_values = []
+    suffix = os.path.splitext(
+        uploaded_file.name
+    )[1]
 
-    for i in range(X.shape[1]):
+    fd, path = tempfile.mkstemp(
+        suffix=suffix
+    )
 
-        X_other = np.delete(
-            X,
-            i,
-            axis=1
+    os.close(fd)
+
+    with open(path, "wb") as f:
+        f.write(
+            uploaded_file.getbuffer()
         )
 
-        y_target = X[:, i]
-
-        model = LinearRegression()
-
-        model.fit(
-            X_other,
-            y_target
-        )
-
-        r2 = model.score(
-            X_other,
-            y_target
-        )
-
-        if r2 >= 0.999999:
-            vif = np.inf
-        else:
-            vif = 1.0 / (1.0 - r2)
-
-        vif_values.append(vif)
-
-    return pd.DataFrame({
-        "Variable": variables,
-        "VIF": vif_values
-    })
+    return path
 
 
 def bisquare_weights(
@@ -100,105 +76,43 @@ def bisquare_weights(
         dtype=float
     )
 
-    weights = np.zeros_like(
+    w = np.zeros_like(
         distances,
         dtype=float
     )
 
-    if bandwidth <= 0:
-        return weights
+    if (
+        not np.isfinite(bandwidth)
+        or bandwidth <= 0
+    ):
+        return w
 
-    mask = distances < bandwidth
+    mask = (
+        distances < bandwidth
+    )
 
-    weights[mask] = (
-        1.0
+    w[mask] = (
+        1
         -
         (
-            distances[mask] / bandwidth
+            distances[mask]
+            /
+            bandwidth
         ) ** 2
     ) ** 2
 
-    return weights
+    return w
 
 
-def get_local_bandwidth(
-    distances,
+def calculate_local_cn(
+    X,
+    distance_matrix,
     bandwidth
 ):
 
-    sorted_distances = np.sort(
-        np.asarray(
-            distances,
-            dtype=float
-        )
-    )
+    n = X.shape[0]
 
-    bw_index = int(
-        bandwidth
-    ) - 1
-
-    bw_index = max(
-        0,
-        bw_index
-    )
-
-    bw_index = min(
-        bw_index,
-        len(sorted_distances) - 1
-    )
-
-    local_bw = sorted_distances[
-        bw_index
-    ]
-
-    if local_bw <= 0:
-
-        positive_distances = (
-            sorted_distances[
-                sorted_distances > 0
-            ]
-        )
-
-        if len(
-            positive_distances
-        ) == 0:
-
-            local_bw = 1.0
-
-        else:
-
-            local_bw = positive_distances[0]
-
-    return local_bw
-
-
-def calculate_local_condition_numbers(
-    coords,
-    X,
-    bw
-):
-
-    n = coords.shape[0]
-
-    distance_matrix = np.sqrt(
-        (
-            coords[:, None, 0]
-            -
-            coords[None, :, 0]
-        ) ** 2
-        +
-        (
-            coords[:, None, 1]
-            -
-            coords[None, :, 1]
-        ) ** 2
-    )
-
-    local_cn = np.full(
-        n,
-        np.nan,
-        dtype=float
-    )
+    local_CN = np.zeros(n)
 
     for i in range(n):
 
@@ -206,14 +120,20 @@ def calculate_local_condition_numbers(
             distance_matrix[i]
         )
 
-        local_bw = get_local_bandwidth(
-            distances,
-            bw
+        sorted_d = np.sort(
+            distances
         )
+
+        bw_local = sorted_d[
+            min(
+                int(bandwidth) - 1,
+                n - 1
+            )
+        ]
 
         weights = bisquare_weights(
             distances,
-            local_bw
+            bw_local
         )
 
         W = np.diag(
@@ -224,319 +144,159 @@ def calculate_local_condition_numbers(
             X.T
             @ W
             @ X
-        )
-
-        eigvals = np.linalg.eigvalsh(
-            XtWX
-        )
-
-        eigvals = np.real(
-            eigvals
-        )
-
-        eig_max = np.max(
-            eigvals
-        )
-
-        eig_min = np.min(
-            eigvals
-        )
-
-        if (
-            eig_min <= 0
-            or
-            eig_max <= 0
-        ):
-
-            local_cn[i] = np.inf
-
-        else:
-
-            local_cn[i] = np.sqrt(
-                eig_max / eig_min
-            )
-
-    return (
-        local_cn,
-        distance_matrix
-    )
-
-
-def apply_gwrc(
-    coords,
-    X,
-    y,
-    gwr_params,
-    bw,
-    local_cn,
-    distance_matrix
-):
-
-    n = coords.shape[0]
-
-    corrected_betas = np.array(
-        gwr_params,
-        dtype=float,
-        copy=True
-    )
-
-    lambda_local = np.zeros(
-        n,
-        dtype=float
-    )
-
-    for i in range(n):
-
-        if local_cn[i] <= CN_THRESHOLD:
-            continue
-
-        distances = (
-            distance_matrix[i]
-        )
-
-        local_bw = get_local_bandwidth(
-            distances,
-            bw
-        )
-
-        weights = bisquare_weights(
-            distances,
-            local_bw
-        )
-
-        W = np.diag(
-            weights
-        )
-
-        XtWX = (
-            X.T
-            @ W
-            @ X
-        )
-
-        eigvals = np.linalg.eigvalsh(
-            XtWX
-        )
-
-        eigvals = np.real(
-            eigvals
-        )
-
-        eig_min = np.min(
-            eigvals
-        )
-
-        lambda_value = (
-            0.01 * eig_min
-        )
-
-        if lambda_value < 0.001:
-            lambda_value = 0.001
-
-        lambda_local[i] = (
-            lambda_value
-        )
-
-        XTWy = (
-            X.T
-            @ W
-            @ y
-        )
-
-        ridge_matrix = (
-            XtWX
-            +
-            lambda_value
-            *
-            np.eye(
-                X.shape[1]
-            )
         )
 
         try:
 
-            beta_ridge = np.linalg.solve(
-                ridge_matrix,
-                XTWy
+            eigenvalues = np.linalg.eigvalsh(
+                XtWX
             )
 
-            corrected_betas[
-    i,
-    1:
-] = beta_ridge.flatten()[1:]
-
-        except np.linalg.LinAlgError:
-
-            corrected_betas[
-                i,
-                1:
-            ] = gwr_params[
-                i,
-                1:
+            eigenvalues = eigenvalues[
+                eigenvalues > 1e-10
             ]
 
-    return (
-        corrected_betas,
-        lambda_local
-    )
+            if len(eigenvalues) > 0:
+
+                cn = np.sqrt(
+                    eigenvalues.max()
+                    /
+                    eigenvalues.min()
+                )
+
+            else:
+
+                cn = np.nan
+
+        except Exception:
+
+            cn = np.nan
+
+        local_CN[i] = cn
+
+    return local_CN
 
 
-def run_gwr_gwrc(
-    data,
-    bandwidth
+def calculate_gwrc(
+    X,
+    y,
+    gwr_betas,
+    distance_matrix,
+    bandwidth,
+    local_CN
 ):
 
-    bandwidth = int(
-        bandwidth
-    )
+    n = X.shape[0]
 
-    n = len(data)
+    local_lambda = np.zeros(n)
 
-    if bandwidth < 2:
-        raise ValueError(
-            "El bandwidth debe ser mayor o igual a 2."
-        )
-
-    if bandwidth > n:
-        bandwidth = n
-
-    coords = data[
-        [
-            "X_proj",
-            "Y_proj"
-        ]
-    ].values.astype(float)
-
-    X_raw = (
-        data[VARS_MODEL]
-        .values
-        .astype(float)
-    )
-
-    y_gwr = (
-    data["SOC"]
-    .values
-    .astype(float)
-    .reshape((-1, 1))
-)
-
-    scaler = StandardScaler()
-
-    X = scaler.fit_transform(
-        X_raw
-    )
-
-    vif_table = calculate_vif(
-        X,
-        VARS_MODEL
-    )
-
-    X_gwr = np.column_stack(
-        [
-            np.ones(n),
-            X
-        ]
-    )
-
-    gwr_model = GWR(
-        coords,
-        y_gwr,
-        X,
-        bw=bandwidth,
-        fixed=False,
-        kernel="bisquare",
-        constant=True,
-        n_jobs=1
-    )
-
-    gwr_res = gwr_model.fit()
-
-    gwr_params = np.asarray(
-        gwr_res.params,
-        dtype=float
-    )
-
-    if gwr_params.ndim == 1:
-
-        if gwr_params.size == (
-            len(VARS_MODEL) + 1
-        ):
-
-            gwr_params = np.tile(
-                gwr_params,
-                (n, 1)
-            )
-
-        else:
-
-            raise ValueError(
-                "Los parámetros GWR tienen una dimensión inesperada."
-            )
-
-    if gwr_params.shape != (
-        n,
-        len(VARS_MODEL) + 1
-    ):
-
-        raise ValueError(
-            "Dimensiones inesperadas de los parámetros GWR: "
-            + str(gwr_params.shape)
-        )
-
-    gwr_pred = np.asarray(
-        gwr_res.predy,
-        dtype=float
-    ).reshape(-1)
-
-    gwr_residuals = (
-        y_gwr
-        -
-        gwr_pred
-    )
-
-    gwr_r2 = r2_score(
-        y_gwr,
-        gwr_pred
-    )
-
-    gwr_rmse = np.sqrt(
-        mean_squared_error(
-            y_gwr,
-            gwr_pred
-        )
-    )
-
-    gwr_mae = mean_absolute_error(
-        y_gwr,
-        gwr_pred
-    )
-
-    local_cn, distance_matrix = (
-        calculate_local_condition_numbers(
-            coords,
-            X_gwr,
-            bandwidth
-        )
-    )
-
-    corrected_betas, lambda_local = (
-        apply_gwrc(
-            coords,
-            X_gwr,
-            y_gwr,
-            gwr_params,
-            bandwidth,
-            local_cn,
-            distance_matrix
-        )
-    )
-
-    gwrc_pred = np.zeros(
-        n,
-        dtype=float
+    corrected_betas = (
+        gwr_betas.copy()
     )
 
     for i in range(n):
+
+        if (
+            np.isfinite(local_CN[i])
+            and
+            local_CN[i] > CN_THRESHOLD
+        ):
+
+            distances = (
+                distance_matrix[i]
+            )
+
+            sorted_d = np.sort(
+                distances
+            )
+
+            bw_local = sorted_d[
+                min(
+                    int(bandwidth) - 1,
+                    n - 1
+                )
+            ]
+
+            weights = bisquare_weights(
+                distances,
+                bw_local
+            )
+
+            W = np.diag(
+                weights
+            )
+
+            XtWX = (
+                X.T
+                @ W
+                @ X
+            )
+
+            eigvals = np.linalg.eigvalsh(
+                XtWX
+            )
+
+            eigvals = eigvals[
+                eigvals > 1e-10
+            ]
+
+            if len(eigvals) > 0:
+
+                eig_min = eigvals.min()
+
+                lambda_local = (
+                    0.01
+                    *
+                    eig_min
+                )
+
+                if lambda_local <= 0:
+
+                    lambda_local = 0.001
+
+            else:
+
+                lambda_local = 0.001
+
+            local_lambda[i] = (
+                lambda_local
+            )
+
+            I = np.eye(
+                X.shape[1]
+            )
+
+            try:
+
+                beta_ridge = np.linalg.solve(
+                    XtWX
+                    +
+                    lambda_local * I,
+                    X.T
+                    @ W
+                    @ y
+                )
+
+                corrected_betas[
+                    i,
+                    1:
+                ] = (
+                    beta_ridge.flatten()
+                )
+
+            except Exception:
+
+                corrected_betas[i] = (
+                    gwr_betas[i]
+                )
+
+    gwrc_pred = np.zeros(n)
+
+    for i in range(n):
+
+        beta = (
+            corrected_betas[i]
+        )
 
         x_local = np.concatenate(
             [
@@ -548,35 +308,249 @@ def run_gwr_gwrc(
         gwrc_pred[i] = (
             x_local
             @
-            corrected_betas[i]
+            beta
         )
 
-    gwrc_residuals = (
-        y_gwr
-        -
+    return (
+        corrected_betas,
+        local_lambda,
         gwrc_pred
     )
 
-    gwrc_r2 = r2_score(
-        y_gwr,
-        gwrc_pred
+
+def run_gwr_gwrc(
+    data,
+    bandwidth,
+    automatic_bw=False
+):
+
+    coords = data[
+        [
+            "X_proj",
+            "Y_proj"
+        ]
+    ].values.astype(float)
+
+    X_raw = data[
+        VARS_MODEL
+    ].values.astype(float)
+
+    scaler = StandardScaler()
+
+    X = scaler.fit_transform(
+        X_raw
     )
 
-    gwrc_rmse = np.sqrt(
-        mean_squared_error(
+    vif_values = []
+
+    for i, var in enumerate(
+        VARS_MODEL
+    ):
+
+        y_vif = X[:, i]
+
+        X_vif = np.delete(
+            X,
+            i,
+            axis=1
+        )
+
+        reg = LinearRegression()
+
+        reg.fit(
+            X_vif,
+            y_vif
+        )
+
+        r2 = reg.score(
+            X_vif,
+            y_vif
+        )
+
+        if r2 >= 0.999999:
+
+            vif = np.inf
+
+        else:
+
+            vif = 1 / (
+                1 - r2
+            )
+
+        vif_values.append(
+            vif
+        )
+
+    vif_table = pd.DataFrame({
+
+        "Variable": VARS_MODEL,
+
+        "VIF": vif_values
+
+    })
+
+    y = data[
+        "SOC"
+    ].values.astype(float)
+
+    y_gwr = y.reshape(
+        (-1, 1)
+    )
+
+    if automatic_bw:
+
+        selector = Sel_BW(
+            coords,
             y_gwr,
+            X,
+            kernel="bisquare",
+            fixed=False,
+            constant=True,
+            n_jobs=1
+        )
+
+        bw_opt = selector.search(
+            criterion="AICc"
+        )
+
+    else:
+
+        bw_opt = int(
+            bandwidth
+        )
+
+    n = len(data)
+
+    if bw_opt < 2:
+
+        raise ValueError(
+            "El bandwidth debe ser mayor o igual a 2."
+        )
+
+    if bw_opt > n:
+
+        bw_opt = n
+
+    gwr_model = GWR(
+        coords,
+        y_gwr,
+        X,
+        bw=bw_opt,
+        fixed=False,
+        kernel="bisquare",
+        constant=True,
+        n_jobs=1
+    )
+
+    gwr_res = gwr_model.fit()
+
+    gwr_pred = (
+        gwr_res.predy
+        .flatten()
+    )
+
+    gwr_residuals = (
+        y
+        -
+        gwr_pred
+    )
+
+    r2_gwr = r2_score(
+        y,
+        gwr_pred
+    )
+
+    rmse_gwr = np.sqrt(
+        mean_squared_error(
+            y,
+            gwr_pred
+        )
+    )
+
+    mae_gwr = mean_absolute_error(
+        y,
+        gwr_pred
+    )
+
+    gwr_betas = (
+        gwr_res.params
+    )
+
+    dx = (
+        coords[:, None, 0]
+        -
+        coords[None, :, 0]
+    )
+
+    dy = (
+        coords[:, None, 1]
+        -
+        coords[None, :, 1]
+    )
+
+    distance_matrix = np.sqrt(
+        dx**2
+        +
+        dy**2
+    )
+
+    local_CN = calculate_local_cn(
+        X,
+        distance_matrix,
+        bw_opt
+    )
+
+    cn_problem = (
+        local_CN
+        >
+        CN_THRESHOLD
+    )
+
+    n_cn_problem = np.sum(
+        cn_problem
+    )
+
+    pct_cn_problem = (
+        100
+        *
+        n_cn_problem
+        /
+        n
+    )
+
+    (
+        corrected_betas,
+        local_lambda,
+        gwrc_pred
+    ) = calculate_gwrc(
+        X,
+        y_gwr,
+        gwr_betas,
+        distance_matrix,
+        bw_opt,
+        local_CN
+    )
+
+    r2_gwrc = r2_score(
+        y,
+        gwrc_pred
+    )
+
+    rmse_gwrc = np.sqrt(
+        mean_squared_error(
+            y,
             gwrc_pred
         )
     )
 
-    gwrc_mae = mean_absolute_error(
-        y_gwr,
+    mae_gwrc = mean_absolute_error(
+        y,
         gwrc_pred
     )
 
-    results_table = pd.DataFrame({
+    results = pd.DataFrame({
 
-        "Model": [
+        "Modelo": [
             "GWR",
             "GWRC"
         ],
@@ -592,23 +566,23 @@ def run_gwr_gwrc(
         ],
 
         "Bandwidth": [
-            bandwidth,
-            bandwidth
+            bw_opt,
+            bw_opt
         ],
 
-        "R2": [
-            gwr_r2,
-            gwrc_r2
+        "R2_InSample": [
+            r2_gwr,
+            r2_gwrc
         ],
 
-        "RMSE": [
-            gwr_rmse,
-            gwrc_rmse
+        "RMSE_InSample": [
+            rmse_gwr,
+            rmse_gwrc
         ],
 
-        "MAE": [
-            gwr_mae,
-            gwrc_mae
+        "MAE_InSample": [
+            mae_gwr,
+            mae_gwrc
         ],
 
         "AIC": [
@@ -620,6 +594,7 @@ def run_gwr_gwrc(
             gwr_res.aicc,
             np.nan
         ]
+
     })
 
     cn_table = pd.DataFrame({
@@ -628,60 +603,142 @@ def run_gwr_gwrc(
 
         "Y": data["Y"].values,
 
-        "X_proj": data["X_proj"].values,
+        "X_projected": coords[:, 0],
 
-        "Y_proj": data["Y_proj"].values,
+        "Y_projected": coords[:, 1],
 
-        "Local_CN": local_cn,
+        "CN_Local": local_CN,
 
-        "CN_Threshold": CN_THRESHOLD,
-
-        "Ridge_Correction": (
-            local_cn
+        "CN_GT_25": (
+            local_CN
             >
             CN_THRESHOLD
         ),
 
-        "Lambda_Local": lambda_local
+        "Lambda_Local":
+            local_lambda
+
     })
 
-    coefficient_table = pd.DataFrame(
+    coef_columns = [
+        "Intercept"
+    ] + VARS_MODEL
+
+    coef_table = pd.DataFrame(
         corrected_betas,
-        columns=[
-            "Intercept"
-        ]
-        +
-        VARS_MODEL
+        columns=coef_columns
     )
 
-    coefficient_table.insert(
+    coef_table.insert(
+        0,
+        "Y",
+        data["Y"].values
+    )
+
+    coef_table.insert(
         0,
         "X",
         data["X"].values
     )
 
-    coefficient_table.insert(
-        1,
-        "Y",
-        data["Y"].values
+    coef_table["SOC_GWR"] = (
+        gwr_pred
+    )
+
+    coef_table["SOC_GWRC"] = (
+        gwrc_pred
     )
 
     residual_table = pd.DataFrame({
 
-    "X": np.asarray(data["X"].values).ravel(),
+        "X": data["X"].values,
 
-    "Y": np.asarray(data["Y"].values).ravel(),
+        "Y": data["Y"].values,
 
-    "SOC_Observed": np.asarray(y_gwr).ravel(),
+        "SOC_Observed": y,
 
-    "SOC_GWR": np.asarray(gwr_pred).ravel(),
+        "SOC_GWR": gwr_pred,
 
-    "Residual_GWR": np.asarray(gwr_residuals).ravel(),
+        "Residual_GWR":
+            y - gwr_pred,
 
-    "SOC_GWRC": np.asarray(gwrc_pred).ravel(),
+        "SOC_GWRC": gwrc_pred,
 
-    "Residual_GWRC": np.asarray(gwrc_residuals).ravel()
-})
+        "Residual_GWRC":
+            y - gwrc_pred,
+
+        "CN_Local": local_CN,
+
+        "Lambda_Local":
+            local_lambda
+
+    })
+
+    summary = pd.DataFrame({
+
+        "Parametro": [
+
+            "N",
+
+            "Variables",
+
+            "Bandwidth",
+
+            "CN_threshold",
+
+            "N_CN_gt_25",
+
+            "Percent_CN_gt_25",
+
+            "CN_min",
+
+            "CN_max",
+
+            "CN_mean",
+
+            "Lambda_min",
+
+            "Lambda_max",
+
+            "Lambda_mean"
+
+        ],
+
+        "Valor": [
+
+            n,
+
+            len(VARS_MODEL),
+
+            bw_opt,
+
+            CN_THRESHOLD,
+
+            n_cn_problem,
+
+            pct_cn_problem,
+
+            np.nanmin(
+                local_CN
+            ),
+
+            np.nanmax(
+                local_CN
+            ),
+
+            np.nanmean(
+                local_CN
+            ),
+
+            local_lambda.min(),
+
+            local_lambda.max(),
+
+            local_lambda.mean()
+
+        ]
+
+    })
 
     return {
 
@@ -693,161 +750,233 @@ def run_gwr_gwrc(
 
         "gwr_res": gwr_res,
 
-        "gwr_params": gwr_params,
+        "gwr_params": gwr_betas,
 
-        "gwr_pred": gwr_pred,
+        "corrected_betas":
+            corrected_betas,
 
-        "gwrc_pred": gwrc_pred,
+        "gwr_pred":
+            gwr_pred,
 
-        "gwrc_residuals": gwrc_residuals,
+        "gwrc_pred":
+            gwrc_pred,
 
-        "corrected_betas": corrected_betas,
+        "gwr_residuals":
+            gwr_residuals,
 
-        "local_cn": local_cn,
+        "bw_opt":
+            bw_opt,
 
-        "lambda_local": lambda_local,
+        "local_CN":
+            local_CN,
 
-        "distance_matrix": distance_matrix,
+        "local_lambda":
+            local_lambda,
 
-        "results_table": results_table,
+        "distance_matrix":
+            distance_matrix,
 
-        "cn_table": cn_table,
+        "results":
+            results,
 
-        "coefficient_table": coefficient_table,
+        "vif_table":
+            vif_table,
 
-        "residual_table": residual_table,
+        "cn_table":
+            cn_table,
 
-        "vif_table": vif_table
+        "coef_table":
+            coef_table,
+
+        "residual_table":
+            residual_table,
+
+        "summary":
+            summary,
+
+        "r2_gwr":
+            r2_gwr,
+
+        "rmse_gwr":
+            rmse_gwr,
+
+        "mae_gwr":
+            mae_gwr,
+
+        "r2_gwrc":
+            r2_gwrc,
+
+        "rmse_gwrc":
+            rmse_gwrc,
+
+        "mae_gwrc":
+            mae_gwrc
     }
 
 
-def prepare_rasters(
-    uploaded_rasters
+def create_rasters(
+    data,
+    results,
+    raster_paths
 ):
 
-    raster_arrays = {}
+    coords = results[
+        "coords"
+    ]
 
-    bounds = None
+    gwr_betas = results[
+        "gwr_params"
+    ]
 
-    for var in VARS_MODEL:
+    corrected_betas = results[
+        "corrected_betas"
+    ]
 
-        uploaded_file = (
-            uploaded_rasters[var]
+    bw_opt = results[
+        "bw_opt"
+    ]
+
+    raster_crs = None
+
+    bounds_list = []
+
+    for path in raster_paths.values():
+
+        with rasterio.open(path) as src:
+
+            if raster_crs is None:
+
+                raster_crs = src.crs
+
+            bounds_list.append(
+                (
+                    src.bounds.left,
+                    src.bounds.bottom,
+                    src.bounds.right,
+                    src.bounds.top
+                )
+            )
+
+    left = min(
+        b[0]
+        for b in bounds_list
+    )
+
+    bottom = min(
+        b[1]
+        for b in bounds_list
+    )
+
+    right = max(
+        b[2]
+        for b in bounds_list
+    )
+
+    top = max(
+        b[3]
+        for b in bounds_list
+    )
+
+    transformer_bounds = (
+        Transformer.from_crs(
+            raster_crs,
+            TARGET_CRS,
+            always_xy=True
         )
+    )
 
-        with rasterio.open(
-            uploaded_file
-        ) as src:
+    xmin, ymin = (
+        transformer_bounds.transform(
+            left,
+            bottom
+        )
+    )
 
-            left = src.bounds.left
-            bottom = src.bounds.bottom
-            right = src.bounds.right
-            top = src.bounds.top
-
-            if bounds is None:
-
-                bounds = [
-                    left,
-                    bottom,
-                    right,
-                    top
-                ]
-
-            else:
-
-                bounds[0] = min(
-                    bounds[0],
-                    left
-                )
-
-                bounds[1] = min(
-                    bounds[1],
-                    bottom
-                )
-
-                bounds[2] = max(
-                    bounds[2],
-                    right
-                )
-
-                bounds[3] = max(
-                    bounds[3],
-                    top
-                )
-
-    min_x, min_y, max_x, max_y = (
-        bounds
+    xmax, ymax = (
+        transformer_bounds.transform(
+            right,
+            top
+        )
     )
 
     width = int(
         np.ceil(
-            (
-                max_x - min_x
-            )
+            (xmax - xmin)
             /
-            RASTER_RESOLUTION
+            RESOLUTION
         )
     )
 
     height = int(
         np.ceil(
-            (
-                max_y - min_y
-            )
+            (ymax - ymin)
             /
-            RASTER_RESOLUTION
+            RESOLUTION
         )
     )
 
     transform = from_origin(
-        min_x,
-        max_y,
-        RASTER_RESOLUTION,
-        RASTER_RESOLUTION
+        xmin,
+        ymax,
+        RESOLUTION,
+        RESOLUTION
     )
 
-    for var in VARS_MODEL:
+    raster_arrays = {}
 
-        uploaded_file = (
-            uploaded_rasters[var]
+    for variable, path in (
+        raster_paths.items()
+    ):
+
+        destination = np.full(
+            (
+                height,
+                width
+            ),
+            np.nan,
+            dtype=np.float32
         )
 
         with rasterio.open(
-            uploaded_file
+            path
         ) as src:
 
-            destination = np.full(
-                (
-                    height,
-                    width
-                ),
-                np.nan,
-                dtype=np.float32
-            )
-
             reproject(
+
                 source=rasterio.band(
                     src,
                     1
                 ),
+
                 destination=destination,
+
                 src_transform=src.transform,
+
                 src_crs=src.crs,
+
                 dst_transform=transform,
+
                 dst_crs=TARGET_CRS,
+
                 resampling=Resampling.bilinear,
+
                 dst_nodata=np.nan
+
             )
 
-            raster_arrays[var] = (
-                destination
-            )
+        raster_arrays[
+            variable
+        ] = destination
 
     raster_std = {}
 
-    for var in VARS_MODEL:
+    for variable in VARS_MODEL:
 
-        arr = raster_arrays[var]
+        arr = (
+            raster_arrays[
+                variable
+            ].astype(float)
+        )
 
         mean = np.nanmean(
             arr
@@ -863,37 +992,21 @@ def prepare_rasters(
             np.isnan(std)
         ):
 
-            raster_std[var] = (
-                np.zeros_like(arr)
+            raster_std[
+                variable
+            ] = np.zeros_like(
+                arr
             )
 
         else:
 
-            raster_std[var] = (
+            raster_std[
+                variable
+            ] = (
                 arr - mean
             ) / std
 
-    return (
-        raster_arrays,
-        raster_std,
-        transform,
-        width,
-        height
-    )
-
-
-def predict_raster_gwr_gwrc(
-    raster_std,
-    transform,
-    width,
-    height,
-    coords,
-    gwr_params,
-    corrected_betas,
-    bandwidth
-):
-
-    raster_gwr = np.full(
+    gwrc_raster = np.full(
         (
             height,
             width
@@ -902,7 +1015,7 @@ def predict_raster_gwr_gwrc(
         dtype=np.float32
     )
 
-    raster_gwrc = np.full(
+    gwr_raster = np.full(
         (
             height,
             width
@@ -911,31 +1024,18 @@ def predict_raster_gwr_gwrc(
         dtype=np.float32
     )
 
-    raster_cn = np.full(
+    rows_idx, cols_idx = np.indices(
         (
             height,
             width
-        ),
-        np.nan,
-        dtype=np.float32
-    )
-
-    raster_lambda = np.full(
-        (
-            height,
-            width
-        ),
-        np.nan,
-        dtype=np.float32
+        )
     )
 
     grid_x = (
         transform.c
         +
         (
-            np.arange(width)
-            +
-            0.5
+            cols_idx + 0.5
         )
         *
         transform.a
@@ -945,9 +1045,7 @@ def predict_raster_gwr_gwrc(
         transform.f
         +
         (
-            np.arange(height)
-            +
-            0.5
+            rows_idx + 0.5
         )
         *
         transform.e
@@ -961,1124 +1059,889 @@ def predict_raster_gwr_gwrc(
         dtype=bool
     )
 
-    for var in VARS_MODEL:
+    for variable in VARS_MODEL:
 
         valid_mask &= np.isfinite(
-            raster_std[var]
-        )
-
-    valid_rows, valid_cols = np.where(
-        valid_mask
-    )
-
-    for row, col in zip(
-        valid_rows,
-        valid_cols
-    ):
-
-        x_values = np.array(
-            [
-                raster_std[var][
-                    row,
-                    col
-                ]
-                for var in VARS_MODEL
-            ],
-            dtype=float
-        )
-
-        point_x = grid_x[col]
-        point_y = grid_y[row]
-
-        distances = np.sqrt(
-            (
-                coords[:, 0]
-                -
-                point_x
-            ) ** 2
-            +
-            (
-                coords[:, 1]
-                -
-                point_y
-            ) ** 2
-        )
-
-        order = np.argsort(
-            distances
-        )
-
-        k = min(
-            max(
-                1,
-                int(bandwidth)
-            ),
-            len(order)
-        )
-
-        selected = order[:k]
-
-        local_distances = (
-            distances[selected]
-        )
-
-        local_bw = np.max(
-            local_distances
-        )
-
-        if local_bw <= 0:
-
-            positive_distances = (
-                local_distances[
-                    local_distances > 0
-                ]
-            )
-
-            if len(
-                positive_distances
-            ) == 0:
-
-                local_bw = 1.0
-
-            else:
-
-                local_bw = (
-                    positive_distances[0]
-                )
-
-        weights = bisquare_weights(
-            local_distances,
-            local_bw
-        )
-
-        weight_sum = np.sum(
-            weights
-        )
-
-        if weight_sum <= 0:
-
-            weights = np.ones(
-                len(selected)
-            )
-
-            weight_sum = np.sum(
-                weights
-            )
-
-        weights = (
-            weights
-            /
-            weight_sum
-        )
-
-        local_gwr_beta = (
-            weights[:, None]
-            *
-            gwr_params[selected]
-        ).sum(
-            axis=0
-        )
-
-        local_gwrc_beta = (
-            weights[:, None]
-            *
-            corrected_betas[selected]
-        ).sum(
-            axis=0
-        )
-
-        x_design = np.concatenate(
-            [
-                [1.0],
-                x_values
+            raster_std[
+                variable
             ]
         )
 
-        raster_gwr[
-            row,
-            col
-        ] = (
-            x_design
-            @
-            local_gwr_beta
-        )
-
-        raster_gwrc[
-            row,
-            col
-        ] = (
-            x_design
-            @
-            local_gwrc_beta
-        )
-
-    return (
-        raster_gwr,
-        raster_gwrc,
-        raster_cn,
-        raster_lambda,
-        grid_x,
-        grid_y
-    )
-
-
-def krige_residuals(
-    coords,
-    residuals,
-    grid_x,
-    grid_y
-):
-
-    valid = (
-        np.isfinite(
-            coords[:, 0]
-        )
-        &
-        np.isfinite(
-            coords[:, 1]
-        )
-        &
-        np.isfinite(
-            residuals
+    valid_rows, valid_cols = (
+        np.where(
+            valid_mask
         )
     )
-
-    krig_x = coords[
-        valid,
-        0
-    ]
-
-    krig_y = coords[
-        valid,
-        1
-    ]
-
-    krig_residuals = residuals[
-        valid
-    ]
-
-    if len(
-        krig_residuals
-    ) < 3:
-
-        raise ValueError(
-            "No existen suficientes residuos válidos para realizar el kriging."
-        )
-
-    ok = OrdinaryKriging(
-        krig_x,
-        krig_y,
-        krig_residuals,
-        variogram_model="spherical",
-        verbose=False,
-        enable_plotting=False,
-        coordinates_type="euclidean"
-    )
-
-    increasing_y = np.sort(
-        grid_y
-    )
-
-    kriged, variance = ok.execute(
-        "grid",
-        grid_x,
-        increasing_y
-    )
-
-    kriged = np.asarray(
-        kriged,
-        dtype=float
-    )
-
-    variance = np.asarray(
-        variance,
-        dtype=float
-    )
-
-    if grid_y[0] > grid_y[-1]:
-
-        kriged = np.flipud(
-            kriged
-        )
-
-        variance = np.flipud(
-            variance
-        )
-
-    return (
-        kriged,
-        variance
-    )
-
-
-def create_geotiff(
-    array,
-    transform,
-    output_path
-):
-
-    height, width = (
-        array.shape
-    )
-
-    profile = {
-        "driver": "GTiff",
-        "height": height,
-        "width": width,
-        "count": 1,
-        "dtype": "float32",
-        "crs": TARGET_CRS,
-        "transform": transform,
-        "nodata": np.nan,
-        "compress": "deflate"
-    }
-
-    with rasterio.open(
-        output_path,
-        "w",
-        **profile
-    ) as dst:
-
-        dst.write(
-            array.astype(
-                np.float32
-            ),
-            1
-        )
-
-
-def create_results_excel(
-    results,
-    output_path
-):
-
-    with pd.ExcelWriter(
-        output_path,
-        engine="openpyxl"
-    ) as writer:
-
-        results[
-            "results_table"
-        ].to_excel(
-            writer,
-            sheet_name="Model_Metrics",
-            index=False
-        )
-
-        results[
-            "vif_table"
-        ].to_excel(
-            writer,
-            sheet_name="VIF",
-            index=False
-        )
-
-        results[
-            "cn_table"
-        ].to_excel(
-            writer,
-            sheet_name="Local_CN",
-            index=False
-        )
-
-        results[
-            "coefficient_table"
-        ].to_excel(
-            writer,
-            sheet_name="Coefficients",
-            index=False
-        )
-
-        results[
-            "residual_table"
-        ].to_excel(
-            writer,
-            sheet_name="Residuals",
-            index=False
-        )
-
-
-def create_zip(
-    files,
-    zip_path
-):
-
-    with zipfile.ZipFile(
-        zip_path,
-        "w",
-        zipfile.ZIP_DEFLATED
-    ) as z:
-
-        for file_path in files:
-
-            z.write(
-                file_path,
-                arcname=os.path.basename(
-                    file_path
-                )
-            )
-
-
-st.title(
-    "GWRCK Spatial Model"
-)
-
-st.write(
-    "GWR → GWRC → Kriging de residuos → GWRCK"
-)
-
-st.divider()
-
-
-st.subheader(
-    "1. Datos de puntos"
-)
-
-excel_file = st.file_uploader(
-    "Sube el archivo Excel con X, Y, SOC y las variables predictoras",
-    type=["xlsx"]
-)
-
-
-st.subheader(
-    "2. Rasters predictivos"
-)
-
-st.write(
-    "Sube los ocho rasters GeoTIFF utilizados por el modelo."
-)
-
-uploaded_rasters = {}
-
-for var in VARS_MODEL:
-
-    uploaded_rasters[var] = st.file_uploader(
-        f"{var}.tif",
-        type=["tif", "tiff"],
-        key=f"raster_{var}"
-    )
-
-
-st.subheader(
-    "3. Configuración del bandwidth"
-)
-
-bw_mode = st.radio(
-    "Método para definir bandwidth",
-    [
-        "Automático (AICc)",
-        "Valor manual",
-        "Rango"
-    ]
-)
-
-
-manual_bw = None
-
-if bw_mode == "Valor manual":
-
-    manual_bw = st.number_input(
-        "Bandwidth",
-        min_value=2,
-        value=57,
-        step=1
-    )
-
-
-range_min = None
-range_max = None
-range_step = None
-
-if bw_mode == "Rango":
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-
-        range_min = st.number_input(
-            "Mínimo",
-            min_value=2,
-            value=20,
-            step=1
-        )
-
-    with col2:
-
-        range_max = st.number_input(
-            "Máximo",
-            min_value=2,
-            value=60,
-            step=1
-        )
-
-    with col3:
-
-        range_step = st.number_input(
-            "Paso",
-            min_value=1,
-            value=5,
-            step=1
-        )
-
-
-run_model = st.button(
-    "Ejecutar GWRCK",
-    type="primary",
-    use_container_width=True
-)
-
-
-if run_model:
-
-    if excel_file is None:
-
-        st.error(
-            "Debes subir el archivo Excel."
-        )
-
-        st.stop()
-
-    missing_rasters = [
-        var
-        for var in VARS_MODEL
-        if uploaded_rasters[var] is None
-    ]
-
-    if missing_rasters:
-
-        st.error(
-            "Faltan los siguientes rasters: "
-            +
-            ", ".join(
-                missing_rasters
-            )
-        )
-
-        st.stop()
-
-    with st.spinner(
-        "Preparando datos..."
-    ):
-
-        data = pd.read_excel(
-            excel_file
-        )
-
-    required_columns = [
-        "X",
-        "Y",
-        "SOC"
-    ] + VARS_MODEL
-
-    missing_columns = [
-        col
-        for col in required_columns
-        if col not in data.columns
-    ]
-
-    if missing_columns:
-
-        st.error(
-            "Faltan columnas en el Excel: "
-            +
-            ", ".join(
-                missing_columns
-            )
-        )
-
-        st.stop()
-
-    data = data[
-        required_columns
-    ].copy()
-
-    data = data.replace(
-        [np.inf, -np.inf],
-        np.nan
-    )
-
-    data = data.dropna()
-
-    if len(data) < 10:
-
-        st.error(
-            "El número de observaciones válidas es insuficiente."
-        )
-
-        st.stop()
-
-    transformer = Transformer.from_crs(
-        SOURCE_CRS,
-        TARGET_CRS,
-        always_xy=True
-    )
-
-    x_proj, y_proj = transformer.transform(
-        data["X"].values,
-        data["Y"].values
-    )
-
-    data["X_proj"] = x_proj
-    data["Y_proj"] = y_proj
-
-    n_points = len(data)
-
-    if bw_mode == "Automático (AICc)":
-
-        st.info(
-            "Calculando bandwidth automático mediante AICc..."
-        )
-
-        X_raw_auto = (
-            data[VARS_MODEL]
-            .values
-            .astype(float)
-        )
-
-        scaler_auto = StandardScaler()
-
-        X_auto = scaler_auto.fit_transform(
-            X_raw_auto
-        )
-
-        coords_auto = data[
-            [
-                "X_proj",
-                "Y_proj"
-            ]
-        ].values.astype(float)
-
-        y_auto = (
-            data["SOC"]
-            .values
-            .astype(float)
-        )
-
-        selector = Sel_BW(
-            coords_auto,
-            y_auto,
-            X_auto,
-            kernel="bisquare",
-            fixed=False,
-            constant=True,
-            n_jobs=1
-        )
-
-        bw_opt = selector.search(
-            criterion="AICc"
-        )
-
-        bw_array = np.asarray(
-            bw_opt
-        )
-
-        if bw_array.ndim == 0:
-
-            bw_value = bw_array.item()
-
-        else:
-
-            bw_value = bw_array.reshape(
-                -1
-            )[0]
-
-        bandwidths_to_run = [
-            int(
-                round(
-                    float(
-                        bw_value
-                    )
-                )
-            )
-        ]
-
-    elif bw_mode == "Valor manual":
-
-        bandwidths_to_run = [
-            int(manual_bw)
-        ]
-
-    else:
-
-        if range_max < range_min:
-
-            st.error(
-                "El máximo debe ser mayor o igual al mínimo."
-            )
-
-            st.stop()
-
-        bandwidths_to_run = list(
-            range(
-                int(range_min),
-                int(range_max) + 1,
-                int(range_step)
-            )
-        )
-
-    bandwidths_to_run = [
-        min(
-            max(
-                2,
-                int(bw)
-            ),
-            n_points
-        )
-        for bw in bandwidths_to_run
-    ]
-
-    bandwidths_to_run = list(
-        dict.fromkeys(
-            bandwidths_to_run
-        )
-    )
-
-    st.write(
-        "Bandwidth seleccionado(s):",
-        bandwidths_to_run
-    )
-
-    all_results = []
 
     progress = st.progress(
         0
     )
 
-    for i, bandwidth in enumerate(
-        bandwidths_to_run
+    total = len(
+        valid_rows
+    )
+
+    for count, (r, c) in enumerate(
+        zip(
+            valid_rows,
+            valid_cols
+        )
     ):
 
-        try:
+        x_values = np.array([
 
-            result = run_gwr_gwrc(
-                data,
-                bandwidth
+            raster_std[v][r, c]
+
+            for v in VARS_MODEL
+
+        ])
+
+        if not np.all(
+            np.isfinite(
+                x_values
             )
+        ):
 
-            metrics = (
-                result[
-                    "results_table"
-                ].copy()
-            )
+            continue
 
-            all_results.append(
-                metrics
-            )
+        gx = grid_x[r, c]
 
-        except Exception as e:
+        gy = grid_y[r, c]
 
-            import traceback
+        distances = np.sqrt(
 
-            st.error(
-                f"Error con bandwidth {bandwidth}: {e}"
-            )
+            (
+                coords[:, 0]
+                -
+                gx
+            ) ** 2
 
-            st.code(
-                traceback.format_exc()
-            )
-
-            st.stop()
-
-        progress.progress(
-            (i + 1)
-            /
-            len(
-                bandwidths_to_run
-            )
-        )
-
-    if len(all_results) > 1:
-
-        bandwidth_comparison = pd.concat(
-            all_results,
-            ignore_index=True
-        )
-
-        st.subheader(
-            "Comparación de bandwidth"
-        )
-
-        st.dataframe(
-            bandwidth_comparison,
-            use_container_width=True
-        )
-
-        best_row = (
-            bandwidth_comparison[
-                bandwidth_comparison[
-                    "Model"
-                ] == "GWR"
-            ]
-            .sort_values(
-                "AICc"
-            )
-            .iloc[0]
-        )
-
-        selected_bandwidth = int(
-            best_row[
-                "Bandwidth"
-            ]
-        )
-
-        st.info(
-            "Bandwidth seleccionado para "
-            "el procesamiento final: "
             +
-            str(
-                selected_bandwidth
+
+            (
+                coords[:, 1]
+                -
+                gy
+            ) ** 2
+
+        )
+
+        sorted_idx = np.argsort(
+            distances
+        )
+
+        idx = sorted_idx[
+            :
+            min(
+                int(bw_opt),
+                len(coords)
             )
+        ]
+
+        local_dist = distances[
+            idx
+        ]
+
+        local_bw = (
+            local_dist[-1]
         )
 
-    else:
-
-        selected_bandwidth = (
-            bandwidths_to_run[0]
+        weights = bisquare_weights(
+            local_dist,
+            local_bw
         )
+
+        if (
+            np.sum(weights)
+            <=
+            0
+        ):
+
+            continue
+
+        w_norm = (
+            weights
+            /
+            np.sum(weights)
+        )
+
+        beta_local = (
+            gwr_betas[idx]
+        )
+
+        beta_gwr = np.sum(
+
+            beta_local
+            *
+            w_norm[:, None],
+
+            axis=0
+
+        )
+
+        x_design = np.concatenate(
+
+            [
+                [1.0],
+                x_values
+            ]
+
+        )
+
+        pred_gwr = (
+            x_design
+            @
+            beta_gwr
+        )
+
+        beta_local_corrected = (
+            corrected_betas[idx]
+        )
+
+        beta_gwrc = np.sum(
+
+            beta_local_corrected
+            *
+            w_norm[:, None],
+
+            axis=0
+
+        )
+
+        pred_gwrc = (
+            x_design
+            @
+            beta_gwrc
+        )
+
+        gwr_raster[
+            r,
+            c
+        ] = pred_gwr
+
+        gwrc_raster[
+            r,
+            c
+        ] = pred_gwrc
+
+        if (
+            count
+            %
+            max(
+                1,
+                total // 100
+            )
+            ==
+            0
+        ):
+
+            progress.progress(
+
+                min(
+                    1.0,
+                    count
+                    /
+                    max(
+                        1,
+                        total
+                    )
+                )
+
+            )
+
+    progress.progress(
+        1.0
+    )
+
+    grid_points = np.column_stack(
+        coords
+    )
+
+    grid_coordinates = np.column_stack(
+
+        [
+            grid_x.ravel(),
+            grid_y.ravel()
+        ]
+
+    )
+
+    cn_grid = griddata(
+
+        grid_points,
+
+        results[
+            "local_CN"
+        ],
+
+        grid_coordinates,
+
+        method="nearest"
+
+    )
+
+    cn_grid = (
+        cn_grid.reshape(
+            height,
+            width
+        ).astype(
+            np.float32
+        )
+    )
+
+    lambda_grid = griddata(
+
+        grid_points,
+
+        results[
+            "local_lambda"
+        ],
+
+        grid_coordinates,
+
+        method="nearest"
+
+    )
+
+    lambda_grid = (
+        lambda_grid.reshape(
+            height,
+            width
+        ).astype(
+            np.float32
+        )
+    )
+
+    profile = {
+
+        "driver": "GTiff",
+
+        "height": height,
+
+        "width": width,
+
+        "count": 1,
+
+        "dtype": "float32",
+
+        "crs": TARGET_CRS,
+
+        "transform": transform,
+
+        "nodata": np.nan,
+
+        "compress": "lzw"
+
+    }
+
+    import tempfile
+
+    output_paths = {}
+
+    raster_outputs = {
+
+        "SOC_GWR_30m.tif":
+            gwr_raster,
+
+        "SOC_GWRC_30m.tif":
+            gwrc_raster,
+
+        "CN_Local_30m.tif":
+            cn_grid,
+
+        "Lambda_Local_30m.tif":
+            lambda_grid
+
+    }
+
+    for filename, array in (
+        raster_outputs.items()
+    ):
+
+        path = os.path.join(
+
+            tempfile.gettempdir(),
+
+            filename
+
+        )
+
+        with rasterio.open(
+
+            path,
+
+            "w",
+
+            **profile
+
+        ) as dst:
+
+            dst.write(
+
+                array.astype(
+                    np.float32
+                ),
+
+                1
+
+            )
+
+        output_paths[
+            filename
+        ] = path
+
+    return output_paths
+
+
+st.sidebar.header(
+    "Datos de entrada"
+)
+
+excel_upload = (
+    st.sidebar.file_uploader(
+        "Excel con datos de SOC",
+        type=["xlsx"]
+    )
+)
+
+st.sidebar.subheader(
+    "Rasters predictoras"
+)
+
+raster_uploads = {}
+
+for variable in VARS_MODEL:
+
+    uploaded = (
+        st.sidebar.file_uploader(
+            f"{variable}.tif",
+            type=["tif", "tiff"],
+            key=f"raster_{variable}"
+        )
+    )
+
+    raster_uploads[
+        variable
+    ] = uploaded
+
+st.sidebar.subheader(
+    "Configuración GWR"
+)
+
+automatic_bw = (
+    st.sidebar.checkbox(
+        "Calcular bandwidth automáticamente con AICc",
+        value=False
+    )
+)
+
+bandwidth = (
+    st.sidebar.number_input(
+        "Bandwidth",
+        min_value=2,
+        max_value=94,
+        value=57,
+        step=1,
+        disabled=automatic_bw
+    )
+)
+
+run_model = (
+    st.sidebar.button(
+        "Ejecutar GWR + GWRC",
+        type="primary",
+        use_container_width=True
+    )
+)
+
+if excel_upload is None:
+
+    st.info(
+        "Carga el archivo Excel para comenzar."
+    )
+
+    st.stop()
+
+missing_rasters = [
+
+    variable
+
+    for variable, uploaded
+    in raster_uploads.items()
+
+    if uploaded is None
+
+]
+
+if missing_rasters:
+
+    st.warning(
+
+        "Faltan estos rasters: "
+        +
+        ", ".join(
+            missing_rasters
+        )
+
+    )
+
+    st.stop()
+
+if not run_model:
+
+    st.info(
+
+        "Carga todos los rasters y pulsa "
+        "'Ejecutar GWR + GWRC'."
+
+    )
+
+    st.stop()
+
+
+try:
 
     with st.spinner(
-        "Ejecutando modelo GWR y corrección GWRC..."
+        "Preparando datos..."
     ):
 
-        results = run_gwr_gwrc(
+        excel_path = (
+            save_uploaded_file(
+                excel_upload
+            )
+        )
+
+        raster_paths = {}
+
+        for variable, uploaded in (
+            raster_uploads.items()
+        ):
+
+            raster_paths[
+                variable
+            ] = save_uploaded_file(
+                uploaded
+            )
+
+        data = pd.read_excel(
+            excel_path
+        )
+
+        required_columns = [
+
+            "X",
+            "Y",
+            "SOC"
+
+        ] + VARS_MODEL
+
+        missing = [
+
+            c
+
+            for c in required_columns
+
+            if c not in data.columns
+
+        ]
+
+        if missing:
+
+            raise ValueError(
+
+                "Faltan columnas en el Excel: "
+                +
+                str(missing)
+
+            )
+
+        data = data.replace(
+
+            [
+                np.inf,
+                -np.inf
+            ],
+
+            np.nan
+
+        )
+
+        data = data.dropna(
+
+            subset=required_columns
+
+        ).copy()
+
+        if len(data) < 2:
+
+            raise ValueError(
+
+                "No hay suficientes registros válidos."
+
+            )
+
+        lon = data[
+            "X"
+        ].astype(float).values
+
+        lat = data[
+            "Y"
+        ].astype(float).values
+
+        transformer = (
+            Transformer.from_crs(
+
+                "EPSG:4326",
+
+                TARGET_CRS,
+
+                always_xy=True
+
+            )
+        )
+
+        X_proj, Y_proj = (
+            transformer.transform(
+                lon,
+                lat
+            )
+        )
+
+        data["X_proj"] = X_proj
+
+        data["Y_proj"] = Y_proj
+
+    st.success(
+
+        f"Datos preparados: "
+        f"{len(data)} observaciones válidas."
+
+    )
+
+    with st.spinner(
+        "Ejecutando GWR y GWRC..."
+    ):
+
+        result = run_gwr_gwrc(
+
             data,
-            selected_bandwidth
+
+            bandwidth,
+
+            automatic_bw
+
         )
 
     st.success(
-        "GWR y GWRC completados."
+        "GWR y GWRC ejecutados correctamente."
     )
 
     st.subheader(
-        "Resultados GWR y GWRC"
+        "Resultados del modelo"
     )
 
     st.dataframe(
-        results["results_table"],
-        use_container_width=True
+
+        result["results"],
+
+        use_container_width=True,
+
+        hide_index=True
+
     )
 
-    col1, col2, col3 = st.columns(3)
-
-    gwr_metrics = (
-        results[
-            "results_table"
-        ].iloc[0]
-    )
-
-    gwrc_metrics = (
-        results[
-            "results_table"
-        ].iloc[1]
+    col1, col2, col3 = st.columns(
+        3
     )
 
     with col1:
 
         st.metric(
+
             "GWR R²",
-            f"{gwr_metrics['R2']:.4f}"
+
+            f'{result["r2_gwr"]:.4f}'
+
         )
 
     with col2:
 
         st.metric(
-            "GWRC R²",
-            f"{gwrc_metrics['R2']:.4f}"
+
+            "GWR RMSE",
+
+            f'{result["rmse_gwr"]:.4f}'
+
         )
 
     with col3:
 
-        corrected_points = int(
-            np.sum(
-                results[
-                    "local_cn"
-                ]
-                >
-                CN_THRESHOLD
-            )
-        )
-
         st.metric(
-            "Puntos corregidos",
-            corrected_points
+
+            "GWR MAE",
+
+            f'{result["mae_gwr"]:.4f}'
+
         )
 
-    with st.spinner(
-        "Preparando rasters..."
-    ):
-
-        (
-            raster_arrays,
-            raster_std,
-            transform,
-            width,
-            height
-        ) = prepare_rasters(
-            uploaded_rasters
-        )
-
-    with st.spinner(
-        "Calculando predicción espacial GWR y GWRC..."
-    ):
-
-        (
-            raster_gwr,
-            raster_gwrc,
-            raster_cn,
-            raster_lambda,
-            grid_x,
-            grid_y
-        ) = predict_raster_gwr_gwrc(
-            raster_std,
-            transform,
-            width,
-            height,
-            results["coords"],
-            results["gwr_params"],
-            results["corrected_betas"],
-            selected_bandwidth
-        )
-
-    with st.spinner(
-        "Ejecutando kriging de residuos GWRC..."
-    ):
-
-        (
-            kriged_residual,
-            kriging_variance
-        ) = krige_residuals(
-            results["coords"],
-            results["gwrc_residuals"],
-            grid_x,
-            grid_y
-        )
-
-    raster_gwrck = (
-        raster_gwrc
-        +
-        kriged_residual
+    col1, col2, col3 = st.columns(
+        3
     )
-
-    st.success(
-        "GWRCK completado."
-    )
-
-    st.subheader(
-        "Estructura final del GWRCK"
-    )
-
-    st.code(
-        "SOC_GWRCK = SOC_GWRC + Kriged_Residual_GWRC"
-    )
-
-    temp_dir = tempfile.mkdtemp()
-
-    gwr_path = os.path.join(
-        temp_dir,
-        "SOC_GWR_30m.tif"
-    )
-
-    gwrc_path = os.path.join(
-        temp_dir,
-        "SOC_GWRC_30m.tif"
-    )
-
-    residual_path = os.path.join(
-        temp_dir,
-        "Residual_GWRC_Kriged_30m.tif"
-    )
-
-    variance_path = os.path.join(
-        temp_dir,
-        "Kriging_Variance_30m.tif"
-    )
-
-    gwrck_path = os.path.join(
-        temp_dir,
-        "SOC_GWRCK_30m.tif"
-    )
-
-    cn_path = os.path.join(
-        temp_dir,
-        "CN_Local_30m.tif"
-    )
-
-    lambda_path = os.path.join(
-        temp_dir,
-        "Lambda_Local_30m.tif"
-    )
-
-    excel_path = os.path.join(
-        temp_dir,
-        "GWRCK_results.xlsx"
-    )
-
-    create_geotiff(
-        raster_gwr,
-        transform,
-        gwr_path
-    )
-
-    create_geotiff(
-        raster_gwrc,
-        transform,
-        gwrc_path
-    )
-
-    create_geotiff(
-        kriged_residual,
-        transform,
-        residual_path
-    )
-
-    create_geotiff(
-        kriging_variance,
-        transform,
-        variance_path
-    )
-
-    create_geotiff(
-        raster_gwrck,
-        transform,
-        gwrck_path
-    )
-
-    create_geotiff(
-        raster_cn,
-        transform,
-        cn_path
-    )
-
-    create_geotiff(
-        raster_lambda,
-        transform,
-        lambda_path
-    )
-
-    create_results_excel(
-        results,
-        excel_path
-    )
-
-    output_files = [
-        gwr_path,
-        gwrc_path,
-        residual_path,
-        variance_path,
-        gwrck_path,
-        cn_path,
-        lambda_path,
-        excel_path
-    ]
-
-    zip_path = os.path.join(
-        temp_dir,
-        "GWRCK_results.zip"
-    )
-
-    create_zip(
-        output_files,
-        zip_path
-    )
-
-    st.subheader(
-        "Descargar resultados"
-    )
-
-    col1, col2 = st.columns(2)
-
-    with open(
-        gwrc_path,
-        "rb"
-    ) as f:
-
-        gwrc_bytes = f.read()
-
-    with open(
-        gwrck_path,
-        "rb"
-    ) as f:
-
-        gwrck_bytes = f.read()
-
-    with open(
-        residual_path,
-        "rb"
-    ) as f:
-
-        residual_bytes = f.read()
-
-    with open(
-        zip_path,
-        "rb"
-    ) as f:
-
-        zip_bytes = f.read()
-
-    with open(
-        excel_path,
-        "rb"
-    ) as f:
-
-        excel_bytes = f.read()
 
     with col1:
 
-        st.download_button(
-            "Descargar SOC_GWRC_30m.tif",
-            data=gwrc_bytes,
-            file_name="SOC_GWRC_30m.tif",
-            mime="image/tiff",
-            use_container_width=True
-        )
+        st.metric(
 
-        st.download_button(
-            "Descargar residuos krigeados",
-            data=residual_bytes,
-            file_name="Residual_GWRC_Kriged_30m.tif",
-            mime="image/tiff",
-            use_container_width=True
-        )
+            "GWRC R²",
 
-        st.download_button(
-            "Descargar resultados Excel",
-            data=excel_bytes,
-            file_name="GWRCK_results.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
+            f'{result["r2_gwrc"]:.4f}'
+
         )
 
     with col2:
 
-        st.download_button(
-            "Descargar SOC_GWRCK_30m.tif",
-            data=gwrck_bytes,
-            file_name="SOC_GWRCK_30m.tif",
-            mime="image/tiff",
-            use_container_width=True
+        st.metric(
+
+            "GWRC RMSE",
+
+            f'{result["rmse_gwrc"]:.4f}'
+
         )
 
-        st.download_button(
-            "Descargar todos los resultados (.zip)",
-            data=zip_bytes,
-            file_name="GWRCK_results.zip",
-            mime="application/zip",
-            use_container_width=True
+    with col3:
+
+        st.metric(
+
+            "GWRC MAE",
+
+            f'{result["mae_gwrc"]:.4f}'
+
         )
 
-    st.subheader(
-        "Archivos generados"
+    st.write(
+
+        f'Bandwidth utilizado: '
+        f'**{result["bw_opt"]}**'
+
     )
 
     st.write(
-        """
-        • SOC_GWR_30m.tif
-        • SOC_GWRC_30m.tif
-        • Residual_GWRC_Kriged_30m.tif
-        • Kriging_Variance_30m.tif
-        • SOC_GWRCK_30m.tif
-        • CN_Local_30m.tif
-        • Lambda_Local_30m.tif
-        • GWRCK_results.xlsx
-        """
+
+        f'CN > 25: '
+        f'**{int(np.sum(result["local_CN"] > CN_THRESHOLD))}'
+        f'/{len(data)} '
+        f'('
+        f'{100 * np.sum(result["local_CN"] > CN_THRESHOLD) / len(data):.2f}'
+        f'%)'
+
+    )
+
+    st.subheader(
+        "VIF global"
+    )
+
+    st.dataframe(
+
+        result["vif_table"],
+
+        use_container_width=True,
+
+        hide_index=True
+
+    )
+
+    st.subheader(
+        "CN local y lambda local"
+    )
+
+    st.dataframe(
+
+        result["cn_table"],
+
+        use_container_width=True,
+
+        hide_index=True
+
+    )
+
+    st.subheader(
+        "Coeficientes"
+    )
+
+    st.dataframe(
+
+        result["coef_table"],
+
+        use_container_width=True,
+
+        hide_index=True
+
+    )
+
+    st.subheader(
+        "Predicciones y residuos"
+    )
+
+    st.dataframe(
+
+        result["residual_table"],
+
+        use_container_width=True,
+
+        hide_index=True
+
+    )
+
+    with st.spinner(
+        "Generando rasters GWR y GWRC..."
+    ):
+
+        output_paths = create_rasters(
+
+            data,
+
+            result,
+
+            raster_paths
+
+        )
+
+    st.success(
+        "Rasters generados correctamente."
+    )
+
+    st.subheader(
+        "Descargas"
+    )
+
+    import io
+
+    excel_buffer = io.BytesIO()
+
+    with pd.ExcelWriter(
+
+        excel_buffer,
+
+        engine="openpyxl"
+
+    ) as writer:
+
+        result["results"].to_excel(
+
+            writer,
+
+            sheet_name="Modelos",
+
+            index=False
+
+        )
+
+        result["vif_table"].to_excel(
+
+            writer,
+
+            sheet_name="VIF_Global",
+
+            index=False
+
+        )
+
+        result["cn_table"].to_excel(
+
+            writer,
+
+            sheet_name="CN_Local",
+
+            index=False
+
+        )
+
+        result["coef_table"].to_excel(
+
+            writer,
+
+            sheet_name="Coeficientes",
+
+            index=False
+
+        )
+
+        result["residual_table"].to_excel(
+
+            writer,
+
+            sheet_name="Predicciones",
+
+            index=False
+
+        )
+
+        result["summary"].to_excel(
+
+            writer,
+
+            sheet_name="Resumen",
+
+            index=False
+
+        )
+
+    st.download_button(
+
+        "Descargar RESULTADOS_GWR_GWRC.xlsx",
+
+        data=excel_buffer.getvalue(),
+
+        file_name="RESULTADOS_GWR_GWRC.xlsx",
+
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+
+        use_container_width=True
+
+    )
+
+    for filename, path in (
+        output_paths.items()
+    ):
+
+        with open(
+            path,
+            "rb"
+        ) as f:
+
+            st.download_button(
+
+                f"Descargar {filename}",
+
+                data=f.read(),
+
+                file_name=filename,
+
+                mime="image/tiff",
+
+                key=f"download_{filename}",
+
+                use_container_width=True
+
+            )
+
+except Exception as e:
+
+    import traceback
+
+    st.error(
+
+        f"Error durante la ejecución: {e}"
+
+    )
+
+    st.code(
+
+        traceback.format_exc(),
+
+        language="text"
+
     )
