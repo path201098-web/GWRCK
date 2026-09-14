@@ -871,7 +871,6 @@ def prepare_rasters(
             raster_std[var] = (
                 arr - mean
             ) / std
-        )
 
     return (
         raster_arrays,
