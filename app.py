@@ -668,20 +668,20 @@ def run_gwr_gwrc(
 
     residual_table = pd.DataFrame({
 
-        "X": data["X"].values,
+    "X": np.asarray(data["X"].values).ravel(),
 
-        "Y": data["Y"].values,
+    "Y": np.asarray(data["Y"].values).ravel(),
 
-        "SOC_Observed": y_gwr.ravel(),
+    "SOC_Observed": np.asarray(y_gwr).ravel(),
 
-        "SOC_GWR": gwr_pred,
+    "SOC_GWR": np.asarray(gwr_pred).ravel(),
 
-        "Residual_GWR": gwr_residuals,
+    "Residual_GWR": np.asarray(gwr_residuals).ravel(),
 
-        "SOC_GWRC": gwrc_pred,
+    "SOC_GWRC": np.asarray(gwrc_pred).ravel(),
 
-        "Residual_GWRC": gwrc_residuals
-    })
+    "Residual_GWRC": np.asarray(gwrc_residuals).ravel()
+})
 
     return {
 
