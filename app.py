@@ -414,10 +414,11 @@ def run_gwr_gwrc(
     )
 
     y_gwr = (
-        data["SOC"]
-        .values
-        .astype(float)
-    )
+    data["SOC"]
+    .values
+    .astype(float)
+    .reshape((-1, 1))
+)
 
     scaler = StandardScaler()
 
