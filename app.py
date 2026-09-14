@@ -1253,9 +1253,9 @@ def create_rasters(
         1.0
     )
 
-    grid_points = np.column_stack(
-        coords
-    )
+   grid_points = np.asarray(
+    coords
+)
 
     grid_coordinates = np.column_stack(
 
