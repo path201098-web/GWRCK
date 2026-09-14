@@ -1212,6 +1212,18 @@ def krige_residuals(
         increasing_y
     )
 
+    if np.ma.isMaskedArray(kriged):
+        kriged = np.ma.filled(
+            kriged,
+            np.nan
+        )
+
+    if np.ma.isMaskedArray(variance):
+        variance = np.ma.filled(
+            variance,
+            np.nan
+        )
+
     kriged = np.asarray(
         kriged,
         dtype=float
@@ -1931,6 +1943,39 @@ if run_model:
         & np.isfinite(gwrck_extracted)
     )
 
+    n_gwrc_raster = int(
+        np.sum(np.isfinite(raster_gwrc))
+    )
+
+    n_kriged_raster = int(
+        np.sum(np.isfinite(kriged_residual))
+    )
+
+    n_gwrck_raster = int(
+        np.sum(np.isfinite(raster_gwrck))
+    )
+
+    n_gwrck_points = int(
+        np.sum(valid_metrics)
+    )
+
+    st.write(
+        f"Celdas válidas SOC_GWRC: {n_gwrc_raster:,}"
+    )
+
+    st.write(
+        f"Celdas válidas Residual_GWRC_Kriged: {n_kriged_raster:,}"
+    )
+
+    st.write(
+        f"Celdas válidas SOC_GWRCK: {n_gwrck_raster:,}"
+    )
+
+    st.write(
+        f"Puntos con SOC_GWRCK extraído: "
+        f"{n_gwrck_points}/{len(observed)}"
+    )
+
     if np.sum(valid_metrics) >= 2:
 
         gwrck_r2 = r2_score(
@@ -1997,7 +2042,7 @@ if run_model:
     results["final_point_table"] = final_point_table
 
     st.success(
-        "GWRCK completado."
+        "GWRCK completado mediante suma raster."
     )
 
     st.subheader(
