@@ -1123,6 +1123,32 @@ def predict_raster_gwr_gwrc(
     )
 
 
+def raster_calculator_add(raster_gwrc, kriged_residual):
+
+    if raster_gwrc.shape != kriged_residual.shape:
+        raise ValueError(
+            "SOC_GWRC y Kriged_Residual_GWRC deben tener la misma dimensión."
+        )
+
+    raster_gwrck = np.full(
+        raster_gwrc.shape,
+        np.nan,
+        dtype=float
+    )
+
+    valid = (
+        np.isfinite(raster_gwrc)
+        & np.isfinite(kriged_residual)
+    )
+
+    raster_gwrck[valid] = (
+        raster_gwrc[valid]
+        + kriged_residual[valid]
+    )
+
+    return raster_gwrck
+
+
 def krige_residuals(
     coords,
     residuals,
@@ -1173,10 +1199,7 @@ def krige_residuals(
         variogram_model="spherical",
         verbose=False,
         enable_plotting=False,
-        coordinates_type="euclidean",
-        exact_values=True,
-        pseudo_inv=True,
-        pseudo_inv_type="pinv"
+        coordinates_type="euclidean"
     )
 
     increasing_y = np.sort(
@@ -1209,74 +1232,9 @@ def krige_residuals(
             variance
         )
 
-    point_kriged, point_variance = ok.execute(
-        "points",
-        coords[:, 0],
-        coords[:, 1]
-    )
-
-    point_kriged = np.asarray(
-        point_kriged,
-        dtype=float
-    ).reshape(-1)
-
-    point_variance = np.asarray(
-        point_variance,
-        dtype=float
-    ).reshape(-1)
-
-    valid_source_x = krig_x
-    valid_source_y = krig_y
-    valid_source_z = krig_residuals
-
-    invalid_points = ~np.isfinite(
-        point_kriged
-    )
-
-    if np.any(invalid_points):
-
-        target_x = coords[
-            invalid_points,
-            0
-        ]
-
-        target_y = coords[
-            invalid_points,
-            1
-        ]
-
-        nearest_values = np.empty(
-            len(target_x),
-            dtype=float
-        )
-
-        for i, (x, y) in enumerate(
-            zip(target_x, target_y)
-        ):
-
-            distances = np.sqrt(
-                (valid_source_x - x) ** 2
-                +
-                (valid_source_y - y) ** 2
-            )
-
-            nearest_values[i] = valid_source_z[
-                np.argmin(distances)
-            ]
-
-        point_kriged[
-            invalid_points
-        ] = nearest_values
-
-        point_variance[
-            invalid_points
-        ] = np.nan
-
     return (
         kriged,
-        variance,
-        point_kriged,
-        point_variance
+        variance
     )
 
 
@@ -1926,9 +1884,7 @@ if run_model:
 
         (
             kriged_residual,
-            kriging_variance,
-            residual_kriged_points,
-            residual_kriging_variance_points
+            kriging_variance
         ) = krige_residuals(
             results["coords"],
             results["gwrc_residuals"],
@@ -1936,24 +1892,43 @@ if run_model:
             grid_y
         )
 
-    raster_gwrck = (
-        raster_gwrc
-        +
+    raster_gwrck = raster_calculator_add(
+        raster_gwrc,
         kriged_residual
     )
 
-    gwrck_extracted = (
-        results["gwrc_pred"]
-        +
-        residual_kriged_points
+    point_rows, point_cols = rasterio.transform.rowcol(
+        transform,
+        results["coords"][:, 0],
+        results["coords"][:, 1]
     )
+
+    point_rows = np.asarray(point_rows, dtype=int)
+    point_cols = np.asarray(point_cols, dtype=int)
+
+    valid_extract = (
+        (point_rows >= 0)
+        & (point_rows < raster_gwrck.shape[0])
+        & (point_cols >= 0)
+        & (point_cols < raster_gwrck.shape[1])
+    )
+
+    gwrck_extracted = np.full(
+        len(results["coords"]),
+        np.nan,
+        dtype=float
+    )
+
+    gwrck_extracted[valid_extract] = raster_gwrck[
+        point_rows[valid_extract],
+        point_cols[valid_extract]
+    ]
 
     observed = data["SOC"].values.astype(float)
 
     valid_metrics = (
         np.isfinite(observed)
-        &
-        np.isfinite(gwrck_extracted)
+        & np.isfinite(gwrck_extracted)
     )
 
     if np.sum(valid_metrics) >= 2:
@@ -1981,6 +1956,17 @@ if run_model:
         gwrck_rmse = np.nan
         gwrck_mae = np.nan
 
+    residual_kriged_points = np.full(
+        len(results["coords"]),
+        np.nan,
+        dtype=float
+    )
+
+    residual_kriged_points[valid_extract] = kriged_residual[
+        point_rows[valid_extract],
+        point_cols[valid_extract]
+    ]
+
     final_point_table = pd.DataFrame({
         "X": data["X"].values,
         "Y": data["Y"].values,
@@ -1988,8 +1974,7 @@ if run_model:
         "SOC_GWRC": results["gwrc_pred"],
         "Residual_GWRC": results["gwrc_residuals"],
         "Residual_GWRC_Kriged": residual_kriged_points,
-        "SOC_GWRCK": gwrck_extracted,
-        "Kriging_Variance": residual_kriging_variance_points
+        "SOC_GWRCK_Extracted": gwrck_extracted
     })
 
     gwrck_metrics_row = pd.DataFrame({
