@@ -6,9 +6,16 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import rasterio
+import fiona
 
+from rasterio.features import geometry_mask, bounds as geometry_bounds
 from rasterio.transform import from_origin
-from rasterio.warp import reproject, Resampling, transform_bounds
+from rasterio.warp import (
+    reproject,
+    Resampling,
+    transform_bounds,
+    transform_geom
+)
 
 from pyproj import Transformer
 
@@ -722,10 +729,95 @@ def run_gwr_gwrc(
     }
 
 
+def load_clip_shape(
+    uploaded_shape
+):
+
+    """Carga un shapefile ZIP y lo transforma al CRS de trabajo.
+
+    El retorno es ``(None, None)`` cuando no se proporciona un límite,
+    para que el pipeline original siga funcionando sin cambios.
+    """
+
+    if uploaded_shape is None:
+        return None, None
+
+    temp_shape_dir = tempfile.mkdtemp(
+        prefix="gwrck_shape_"
+    )
+
+    with zipfile.ZipFile(uploaded_shape) as z:
+
+        shp_files = [
+            name
+            for name in z.namelist()
+            if name.lower().endswith(".shp")
+            and not name.startswith("__MACOSX/")
+        ]
+
+        if len(shp_files) != 1:
+            raise ValueError(
+                "El ZIP debe contener exactamente un archivo .shp junto con "
+                "sus archivos .shx, .dbf y .prj."
+            )
+
+        z.extractall(temp_shape_dir)
+
+    shape_path = os.path.join(
+        temp_shape_dir,
+        shp_files[0]
+    )
+
+    with fiona.open(shape_path) as source:
+
+        source_crs = source.crs_wkt or source.crs
+
+        if not source_crs:
+            raise ValueError(
+                "El shapefile no tiene un sistema de coordenadas definido."
+            )
+
+        geometries = [
+            feature["geometry"]
+            for feature in source
+            if feature["geometry"] is not None
+        ]
+
+    if not geometries:
+        raise ValueError(
+            "El shapefile no contiene geometrías válidas."
+        )
+
+    geometries_target = [
+        transform_geom(
+            source_crs,
+            TARGET_CRS,
+            geometry
+        )
+        for geometry in geometries
+    ]
+
+    shape_bounds = [
+        geometry_bounds(geometry)
+        for geometry in geometries_target
+    ]
+
+    clip_bounds = (
+        min(b[0] for b in shape_bounds),
+        min(b[1] for b in shape_bounds),
+        max(b[2] for b in shape_bounds),
+        max(b[3] for b in shape_bounds)
+    )
+
+    return geometries_target, clip_bounds
+
+
 def prepare_rasters(
     uploaded_rasters,
     scaler,
-    coords
+    coords,
+    clip_geometries=None,
+    clip_bounds=None
 ):
 
     raster_arrays = {}
@@ -759,6 +851,21 @@ def prepare_rasters(
     bottom = max(b[1] for b in bounds_target)
     right = min(b[2] for b in bounds_target)
     top = min(b[3] for b in bounds_target)
+
+    # Reducir primero la extensión al rectángulo envolvente del shape.
+    # La máscara poligonal exacta se aplica después de reproyectar los rasters.
+    if clip_bounds is not None:
+
+        left = max(left, clip_bounds[0])
+        bottom = max(bottom, clip_bounds[1])
+        right = min(right, clip_bounds[2])
+        top = min(top, clip_bounds[3])
+
+        if left >= right or bottom >= top:
+            raise ValueError(
+                "El shapefile no se superpone con la intersección de los "
+                "rasters predictivos."
+            )
 
     if left >= right or bottom >= top:
         raise ValueError(
@@ -818,6 +925,28 @@ def prepare_rasters(
 
             raster_arrays[var] = destination
 
+    # Máscara opcional: fuera del polígono todo pasa a NoData. Esto limita
+    # las predicciones y los GeoTIFF, sin eliminar puntos del entrenamiento.
+    if clip_geometries is not None:
+
+        clip_mask = geometry_mask(
+            clip_geometries,
+            out_shape=(height, width),
+            transform=transform,
+            invert=True,
+            all_touched=False
+        )
+
+        for var in VARS_MODEL:
+            raster_arrays[var][~clip_mask] = np.nan
+
+    else:
+
+        clip_mask = np.ones(
+            (height, width),
+            dtype=bool
+        )
+
     # Comprobacion individual y conjunta de la grilla.
     valid_counts = {
         var: int(np.sum(np.isfinite(raster_arrays[var])))
@@ -853,7 +982,13 @@ def prepare_rasters(
         & (point_cols < width)
     )
 
-    if int(np.sum(inside)) < len(coords):
+    # Sin shape, se conserva la validación original: todos los puntos deben
+    # quedar en la grilla. Con shape, los puntos pueden estar fuera del área
+    # de salida y siguen siendo válidos para entrenar GWR/GWRC y el kriging.
+    if (
+        clip_geometries is None
+        and int(np.sum(inside)) < len(coords)
+    ):
         raise ValueError(
             f"La grilla comun de 30 m contiene {int(np.sum(inside))}/{len(coords)} "
             "puntos observados. No se continua para evitar construir un GWRCK "
@@ -886,7 +1021,8 @@ def prepare_rasters(
         width,
         height,
         valid_counts,
-        n_common
+        n_common,
+        clip_mask
     )
 
 
@@ -1433,7 +1569,21 @@ for var in VARS_MODEL:
 
 
 st.subheader(
-    "3. Configuración del bandwidth"
+    "3. Área opcional de procesamiento"
+)
+
+clip_shape_file = st.file_uploader(
+    "Shapefile de recorte (.zip, opcional)",
+    type=["zip"],
+    help=(
+        "El archivo ZIP debe incluir .shp, .shx, .dbf y .prj. "
+        "Los rásters de salida se limitarán al polígono cargado."
+    )
+)
+
+
+st.subheader(
+    "4. Configuración del bandwidth"
 )
 
 bw_mode = st.radio(
@@ -1882,6 +2032,10 @@ if run_model:
         "Preparando rasters..."
     ):
 
+        clip_geometries, clip_bounds = load_clip_shape(
+            clip_shape_file
+        )
+
         (
             raster_arrays,
             raster_std,
@@ -1889,11 +2043,14 @@ if run_model:
             width,
             height,
             valid_counts,
-            n_common
+            n_common,
+            clip_mask
         ) = prepare_rasters(
             uploaded_rasters,
             results["scaler"],
-            results["coords"]
+            results["coords"],
+            clip_geometries,
+            clip_bounds
         )
 
     st.write(f"Celdas comunes validas de los 8 predictores: {n_common:,}")
@@ -1946,6 +2103,11 @@ if run_model:
             grid_x,
             grid_y
         )
+
+    # El kriging se calcula en la grilla reducida; esta máscara garantiza que
+    # las zonas externas al polígono permanezcan como NoData en los resultados.
+    kriged_residual[~clip_mask] = np.nan
+    kriging_variance[~clip_mask] = np.nan
 
     # El resultado anterior es el raster espacial interpolado de los residuos:
     # Residual_GWRC_Kriged_30m.tif
