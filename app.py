@@ -732,14 +732,10 @@ def load_clip_shape(
     uploaded_shape
 ):
 
-    """Carga un shapefile ZIP y lo transforma al CRS de trabajo.
-
-    El retorno es ``(None, None)`` cuando no se proporciona un límite,
-    para que el pipeline original siga funcionando sin cambios.
-    """
+    """Carga un shapefile ZIP y lo transforma al CRS de trabajo."""
 
     if uploaded_shape is None:
-        return None, None
+        return None
 
     temp_shape_dir = tempfile.mkdtemp(
         prefix="gwrck_shape_"
@@ -795,22 +791,55 @@ def load_clip_shape(
         for geometry in shape_gdf.geometry
     ]
 
-    clip_bounds = (
-        float(shape_gdf.total_bounds[0]),
-        float(shape_gdf.total_bounds[1]),
-        float(shape_gdf.total_bounds[2]),
-        float(shape_gdf.total_bounds[3])
+    return geometries_target
+
+
+def clip_rasters_to_shape(
+    arrays,
+    transform,
+    clip_geometries
+):
+
+    """Aplica Clip Raster tras terminar todos los cálculos espaciales.
+
+    Las matrices recibidas ya contienen los resultados completos de GWR,
+    GWRC, kriging y GWRCK. Esta función solo convierte en NoData las celdas
+    exteriores al polígono: no cambia las predicciones ni el kriging.
+    """
+
+    if clip_geometries is None:
+        return arrays, None
+
+    height, width = arrays[0].shape
+
+    clip_mask = geometry_mask(
+        clip_geometries,
+        out_shape=(height, width),
+        transform=transform,
+        invert=True,
+        all_touched=False
     )
 
-    return geometries_target, clip_bounds
+    clipped_arrays = []
+
+    for array in arrays:
+
+        clipped = np.asarray(
+            array,
+            dtype=float
+        ).copy()
+
+        clipped[~clip_mask] = np.nan
+
+        clipped_arrays.append(clipped)
+
+    return clipped_arrays, clip_mask
 
 
 def prepare_rasters(
     uploaded_rasters,
     scaler,
-    coords,
-    clip_geometries=None,
-    clip_bounds=None
+    coords
 ):
 
     raster_arrays = {}
@@ -844,21 +873,6 @@ def prepare_rasters(
     bottom = max(b[1] for b in bounds_target)
     right = min(b[2] for b in bounds_target)
     top = min(b[3] for b in bounds_target)
-
-    # Reducir primero la extensión al rectángulo envolvente del shape.
-    # La máscara poligonal exacta se aplica después de reproyectar los rasters.
-    if clip_bounds is not None:
-
-        left = max(left, clip_bounds[0])
-        bottom = max(bottom, clip_bounds[1])
-        right = min(right, clip_bounds[2])
-        top = min(top, clip_bounds[3])
-
-        if left >= right or bottom >= top:
-            raise ValueError(
-                "El shapefile no se superpone con la intersección de los "
-                "rasters predictivos."
-            )
 
     if left >= right or bottom >= top:
         raise ValueError(
@@ -918,28 +932,6 @@ def prepare_rasters(
 
             raster_arrays[var] = destination
 
-    # Máscara opcional: fuera del polígono todo pasa a NoData. Esto limita
-    # las predicciones y los GeoTIFF, sin eliminar puntos del entrenamiento.
-    if clip_geometries is not None:
-
-        clip_mask = geometry_mask(
-            clip_geometries,
-            out_shape=(height, width),
-            transform=transform,
-            invert=True,
-            all_touched=False
-        )
-
-        for var in VARS_MODEL:
-            raster_arrays[var][~clip_mask] = np.nan
-
-    else:
-
-        clip_mask = np.ones(
-            (height, width),
-            dtype=bool
-        )
-
     # Comprobacion individual y conjunta de la grilla.
     valid_counts = {
         var: int(np.sum(np.isfinite(raster_arrays[var])))
@@ -975,13 +967,7 @@ def prepare_rasters(
         & (point_cols < width)
     )
 
-    # Sin shape, se conserva la validación original: todos los puntos deben
-    # quedar en la grilla. Con shape, los puntos pueden estar fuera del área
-    # de salida y siguen siendo válidos para entrenar GWR/GWRC y el kriging.
-    if (
-        clip_geometries is None
-        and int(np.sum(inside)) < len(coords)
-    ):
+    if int(np.sum(inside)) < len(coords):
         raise ValueError(
             f"La grilla comun de 30 m contiene {int(np.sum(inside))}/{len(coords)} "
             "puntos observados. No se continua para evitar construir un GWRCK "
@@ -1014,8 +1000,7 @@ def prepare_rasters(
         width,
         height,
         valid_counts,
-        n_common,
-        clip_mask
+        n_common
     )
 
 
@@ -2025,7 +2010,7 @@ if run_model:
         "Preparando rasters..."
     ):
 
-        clip_geometries, clip_bounds = load_clip_shape(
+        clip_geometries = load_clip_shape(
             clip_shape_file
         )
 
@@ -2036,14 +2021,11 @@ if run_model:
             width,
             height,
             valid_counts,
-            n_common,
-            clip_mask
+            n_common
         ) = prepare_rasters(
             uploaded_rasters,
             results["scaler"],
-            results["coords"],
-            clip_geometries,
-            clip_bounds
+            results["coords"]
         )
 
     st.write(f"Celdas comunes validas de los 8 predictores: {n_common:,}")
@@ -2097,11 +2079,6 @@ if run_model:
             grid_y
         )
 
-    # El kriging se calcula en la grilla reducida; esta máscara garantiza que
-    # las zonas externas al polígono permanezcan como NoData en los resultados.
-    kriged_residual[~clip_mask] = np.nan
-    kriging_variance[~clip_mask] = np.nan
-
     # El resultado anterior es el raster espacial interpolado de los residuos:
     # Residual_GWRC_Kriged_30m.tif
     # Raster Calculator equivalente a:
@@ -2110,6 +2087,36 @@ if run_model:
         raster_gwrc,
         kriged_residual
     )
+
+    # ÚLTIMO PASO ESPACIAL: Clip Raster equivalente a ArcGIS Pro. Los
+    # resultados se calcularon primero sobre toda la grilla continua; aquí se
+    # recortan todos los TIFF con la geometría del shape, sin recalcular nada.
+    (
+        clipped_rasters,
+        clip_mask
+    ) = clip_rasters_to_shape(
+        [
+            raster_gwr,
+            raster_gwrc,
+            kriged_residual,
+            kriging_variance,
+            raster_gwrck,
+            raster_cn,
+            raster_lambda
+        ],
+        transform,
+        clip_geometries
+    )
+
+    (
+        raster_gwr,
+        raster_gwrc,
+        kriged_residual,
+        kriging_variance,
+        raster_gwrck,
+        raster_cn,
+        raster_lambda
+    ) = clipped_rasters
 
     n_gwrck_after_raster_calculator = int(
         np.sum(np.isfinite(raster_gwrck))
