@@ -694,6 +694,8 @@ def run_gwr_gwrc(
 
         "X": X,
 
+        "X_gwr": X_gwr,
+
         "scaler": scaler,
 
         "gwr_res": gwr_res,
@@ -895,6 +897,7 @@ def predict_raster_gwr_gwrc(
     coords,
     gwr_params,
     corrected_betas,
+    X_gwr,
     bandwidth
 ):
 
@@ -2027,6 +2030,7 @@ if run_model:
             results["coords"],
             results["gwr_params"],
             results["corrected_betas"],
+            results["X_gwr"],
             selected_bandwidth
         )
 
