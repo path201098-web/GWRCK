@@ -6,15 +6,14 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import rasterio
-import fiona
+import geopandas as gpd
 
-from rasterio.features import geometry_mask, bounds as geometry_bounds
+from rasterio.features import geometry_mask
 from rasterio.transform import from_origin
 from rasterio.warp import (
     reproject,
     Resampling,
-    transform_bounds,
-    transform_geom
+    transform_bounds
 )
 
 from pyproj import Transformer
@@ -768,45 +767,39 @@ def load_clip_shape(
         shp_files[0]
     )
 
-    with fiona.open(shape_path) as source:
+    # Se utiliza pyogrio mediante GeoPandas, ya disponible en Streamlit Cloud
+    # con las dependencias actuales del proyecto. Así no se requiere Fiona.
+    shape_gdf = gpd.read_file(
+        shape_path,
+        engine="pyogrio"
+    )
 
-        source_crs = source.crs_wkt or source.crs
+    if shape_gdf.crs is None:
+        raise ValueError(
+            "El shapefile no tiene un sistema de coordenadas definido."
+        )
 
-        if not source_crs:
-            raise ValueError(
-                "El shapefile no tiene un sistema de coordenadas definido."
-            )
+    shape_gdf = shape_gdf[
+        shape_gdf.geometry.notna()
+    ].copy()
 
-        geometries = [
-            feature["geometry"]
-            for feature in source
-            if feature["geometry"] is not None
-        ]
-
-    if not geometries:
+    if shape_gdf.empty:
         raise ValueError(
             "El shapefile no contiene geometrías válidas."
         )
 
-    geometries_target = [
-        transform_geom(
-            source_crs,
-            TARGET_CRS,
-            geometry
-        )
-        for geometry in geometries
-    ]
+    shape_gdf = shape_gdf.to_crs(TARGET_CRS)
 
-    shape_bounds = [
-        geometry_bounds(geometry)
-        for geometry in geometries_target
+    geometries_target = [
+        geometry.__geo_interface__
+        for geometry in shape_gdf.geometry
     ]
 
     clip_bounds = (
-        min(b[0] for b in shape_bounds),
-        min(b[1] for b in shape_bounds),
-        max(b[2] for b in shape_bounds),
-        max(b[3] for b in shape_bounds)
+        float(shape_gdf.total_bounds[0]),
+        float(shape_gdf.total_bounds[1]),
+        float(shape_gdf.total_bounds[2]),
+        float(shape_gdf.total_bounds[3])
     )
 
     return geometries_target, clip_bounds
