@@ -1,6 +1,7 @@
 import os
 import zipfile
 import tempfile
+from pathlib import Path
 
 import shapefile
 from rasterio.mask import mask
@@ -1552,6 +1553,20 @@ def display_geotiff_map(path, title):
     )
     colormap.add_to(m)
 
+    halo_css = """
+    <style>
+        .legend text, .legend label, .legend div {
+            paint-order: stroke fill;
+            stroke: white;
+            stroke-width: 3px;
+            stroke-linejoin: round;
+            text-shadow: 0 0 3px white, 0 0 3px white;
+            font-weight: 600;
+        }
+    </style>
+    """
+    m.get_root().html.add_child(folium.Element(halo_css))
+
     folium.LayerControl(collapsed=False).add_to(m)
 
     st_folium(
@@ -1708,16 +1723,42 @@ st.write(
     "Sube los ocho rasters GeoTIFF utilizados por el modelo."
 )
 
+uploaded_raster_files = st.file_uploader(
+    "Selecciona los 8 rasters predictivos en bloque",
+    type=["tif", "tiff"],
+    accept_multiple_files=True,
+    key="predictor_rasters_batch",
+    help=(
+        "Selecciona simultáneamente ELEV.tif, Curvatu.tif, Slope.tif, "
+        "HillSha.tif, TEMP.tif, PRES.tif, EVI.tif y BSI.tif. "
+        "El nombre del archivo debe identificar la variable."
+    )
+)
+
 uploaded_rasters = {}
+if uploaded_raster_files:
+    for uploaded_file in uploaded_raster_files:
+        stem = Path(uploaded_file.name).stem.strip().lower()
+        for var in VARS_MODEL:
+            var_norm = var.lower()
+            if stem == var_norm or stem.startswith(var_norm + "_") or stem.startswith(var_norm + "-"):
+                uploaded_rasters[var] = uploaded_file
+                break
+
+    missing_rasters = [
+        var for var in VARS_MODEL
+        if var not in uploaded_rasters
+    ]
+
+    if missing_rasters:
+        st.warning(
+            "Faltan los siguientes predictores: "
+            + ", ".join(missing_rasters)
+            + ". Selecciona los ocho archivos con sus nombres de variable correspondientes."
+        )
 
 for var in VARS_MODEL:
-
-    uploaded_rasters[var] = st.file_uploader(
-        f"{var}.tif",
-        type=["tif", "tiff"],
-        key=f"raster_{var}"
-    )
-
+    uploaded_rasters.setdefault(var, None)
 
 st.subheader(
     "3. Área de recorte (opcional)"
@@ -1815,7 +1856,7 @@ if run_model:
     missing_rasters = [
         var
         for var in VARS_MODEL
-        if uploaded_rasters[var] is None
+        if uploaded_rasters.get(var) is None
     ]
 
     if missing_rasters:
@@ -2127,55 +2168,18 @@ if run_model:
         "Resultados GWR y GWRC"
     )
 
+    visible_metrics = results["results_table"][
+        ["Model", "R2", "RMSE", "MAE"]
+    ].copy()
+    visible_metrics.columns = [
+        "Modelo", "R²", "RMSE", "MAE"
+    ]
+
     st.dataframe(
-        results["results_table"],
-        width="stretch"
+        visible_metrics,
+        width="stretch",
+        hide_index=True
     )
-
-    col1, col2, col3 = st.columns(3)
-
-    gwr_metrics = (
-        results[
-            "results_table"
-        ].iloc[0]
-    )
-
-    gwrc_metrics = (
-        results[
-            "results_table"
-        ].iloc[1]
-    )
-
-    with col1:
-
-        st.metric(
-            "GWR R²",
-            f"{gwr_metrics['R2']:.4f}"
-        )
-
-    with col2:
-
-        st.metric(
-            "GWRC R²",
-            f"{gwrc_metrics['R2']:.4f}"
-        )
-
-    with col3:
-
-        corrected_points = int(
-            np.sum(
-                results[
-                    "local_cn"
-                ]
-                >
-                CN_THRESHOLD
-            )
-        )
-
-        st.metric(
-            "Puntos corregidos",
-            corrected_points
-        )
 
     with st.spinner(
         "Preparando rasters..."
@@ -2342,18 +2346,18 @@ if run_model:
         "Resultados finales GWRCK"
     )
 
-    st.dataframe(
-        results["results_table"],
-        width="stretch"
-    )
+    visible_final_metrics = results["results_table"][
+        ["Model", "R2", "RMSE", "MAE"]
+    ].copy()
+    visible_final_metrics.columns = [
+        "Modelo", "R²", "RMSE", "MAE"
+    ]
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("GWRCK R²", f"{gwrck_r2:.4f}")
-    with col2:
-        st.metric("GWRCK RMSE", f"{gwrck_rmse:.4f}")
-    with col3:
-        st.metric("GWRCK MAE", f"{gwrck_mae:.4f}")
+    st.dataframe(
+        visible_final_metrics,
+        width="stretch",
+        hide_index=True
+    )
 
     st.subheader(
         "Estructura final del GWRCK"
@@ -2504,117 +2508,77 @@ if run_model:
     )
 
     st.write(
-        "Explora los GeoTIFF directamente sobre una base satelital. "
-        "Esta visualización es independiente de los cálculos del modelo y no modifica los archivos."
-    )
-
-    visualization_options = {
-        "SOC GWR": output_paths["gwr"],
-        "SOC GWRC": output_paths["gwrc"],
-        "Residuo GWRC krigeado": output_paths["residual"],
-        "Varianza del kriging": output_paths["variance"],
-        "SOC GWRCK": output_paths["gwrck"],
-        "CN local": output_paths["cn"],
-        "Lambda local": output_paths["lambda"]
-    }
-
-    selected_map = st.selectbox(
-        "Selecciona el raster que deseas visualizar",
-        list(visualization_options.keys()),
-        index=4,
-        key="map_raster_selector"
+        "Visualización espacial del resultado final SOCS sobre una base satelital. "
+        "Las demás capas se conservan únicamente como resultados descargables."
     )
 
     with st.spinner("Preparando visualización espacial..."):
         display_geotiff_map(
-            visualization_options[selected_map],
-            selected_map
+            output_paths["gwrck"],
+            "SOCS (Mg ha)"
         )
 
     st.subheader(
         "Descargar resultados"
     )
 
-    col1, col2 = st.columns(2)
+    st.subheader(
+        "Descargar resultados individuales"
+    )
 
-    with open(
-        output_paths["gwrc"],
-        "rb"
-    ) as f:
+    download_labels = {
+        "gwr": "Descargar SOC_GWR_30m.tif",
+        "gwrc": "Descargar SOC_GWRC_30m.tif",
+        "residual": "Descargar Residual_GWRC_Kriged_30m.tif",
+        "variance": "Descargar Kriging_Variance_30m.tif",
+        "gwrck": "Descargar SOC_GWRCK_30m.tif",
+        "cn": "Descargar CN_Local_30m.tif",
+        "lambda": "Descargar Lambda_Local_30m.tif"
+    }
 
-        gwrc_bytes = f.read()
+    download_names = {
+        "gwr": "SOC_GWR_30m.tif",
+        "gwrc": "SOC_GWRC_30m.tif",
+        "residual": "Residual_GWRC_Kriged_30m.tif",
+        "variance": "Kriging_Variance_30m.tif",
+        "gwrck": "SOC_GWRCK_30m.tif",
+        "cn": "CN_Local_30m.tif",
+        "lambda": "Lambda_Local_30m.tif"
+    }
 
-    with open(
-        output_paths["gwrck"],
-        "rb"
-    ) as f:
+    download_items = list(download_labels.keys())
+    for start in range(0, len(download_items), 2):
+        cols = st.columns(2)
+        for col, key in zip(cols, download_items[start:start + 2]):
+            with open(output_paths[key], "rb") as f:
+                file_bytes = f.read()
+            with col:
+                st.download_button(
+                    download_labels[key],
+                    data=file_bytes,
+                    file_name=download_names[key],
+                    mime="image/tiff",
+                    width="stretch",
+                    key=f"download_{key}"
+                )
 
-        gwrck_bytes = f.read()
+    st.download_button(
+        "Descargar resultados Excel",
+        data=excel_bytes,
+        file_name="GWRCK_results.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        width="stretch",
+        key="download_excel_final"
+    )
 
-    with open(
-        output_paths["residual"],
-        "rb"
-    ) as f:
-
-        residual_bytes = f.read()
-
-    with open(
-        zip_path,
-        "rb"
-    ) as f:
-
-        zip_bytes = f.read()
-
-    with open(
-        excel_path,
-        "rb"
-    ) as f:
-
-        excel_bytes = f.read()
-
-    with col1:
-
-        st.download_button(
-            "Descargar SOC_GWRC_30m.tif",
-            data=gwrc_bytes,
-            file_name="SOC_GWRC_30m.tif",
-            mime="image/tiff",
-            width="stretch"
-        )
-
-        st.download_button(
-            "Descargar residuos krigeados",
-            data=residual_bytes,
-            file_name="Residual_GWRC_Kriged_30m.tif",
-            mime="image/tiff",
-            width="stretch"
-        )
-
-        st.download_button(
-            "Descargar resultados Excel",
-            data=excel_bytes,
-            file_name="GWRCK_results.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            width="stretch"
-        )
-
-    with col2:
-
-        st.download_button(
-            "Descargar SOC_GWRCK_30m.tif",
-            data=gwrck_bytes,
-            file_name="SOC_GWRCK_30m.tif",
-            mime="image/tiff",
-            width="stretch"
-        )
-
-        st.download_button(
-            "Descargar todos los resultados (.zip)",
-            data=zip_bytes,
-            file_name="GWRCK_results.zip",
-            mime="application/zip",
-            width="stretch"
-        )
+    st.download_button(
+        "Descargar todos los resultados (.zip)",
+        data=zip_bytes,
+        file_name="GWRCK_results.zip",
+        mime="application/zip",
+        width="stretch",
+        key="download_zip_final"
+    )
 
     st.subheader(
         "Archivos generados"
