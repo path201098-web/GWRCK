@@ -1245,6 +1245,69 @@ def krige_residuals(coords, residuals, grid_x, grid_y, valid_mask=None):
         residual_points.astype(np.float32)
     )
 
+
+def krige_residuals_leave_one_out(coords, residuals):
+    """Predice cada residuo excluyéndolo de su propio kriging.
+
+    Estas predicciones se usan exclusivamente para R², RMSE y MAE. La
+    superficie raster final se mantiene calculada con todos los residuos,
+    pues ésa es la superficie que se entrega al usuario.
+    """
+    coords = np.asarray(coords, dtype=float)
+    residuals = np.asarray(residuals, dtype=float).reshape(-1)
+    n = len(residuals)
+    predictions = np.full(n, np.nan, dtype=np.float32)
+    base_valid = np.isfinite(coords).all(axis=1) & np.isfinite(residuals)
+
+    for held_out in np.where(base_valid)[0]:
+        train = base_valid.copy()
+        train[held_out] = False
+        x = coords[train, 0]
+        y = coords[train, 1]
+        z = residuals[train]
+
+        # Agrupar duplicados del conjunto de entrenamiento para PyKrige.
+        locations = np.column_stack((x, y))
+        unique_locations, inverse = np.unique(locations, axis=0, return_inverse=True)
+        if len(unique_locations) != len(locations):
+            z = np.bincount(inverse, weights=z) / np.bincount(inverse)
+            x = unique_locations[:, 0]
+            y = unique_locations[:, 1]
+
+        if len(z) < 3:
+            continue
+
+        z_mean = float(np.mean(z))
+        z_std = float(np.std(z))
+        if not np.isfinite(z_std) or z_std == 0:
+            predictions[held_out] = z_mean
+            continue
+
+        x0, y0, scale = float(np.mean(x)), float(np.mean(y)), 1000.0
+        ok = OrdinaryKriging(
+            (x - x0) / scale,
+            (y - y0) / scale,
+            (z - z_mean) / z_std,
+            variogram_model="gaussian",
+            nlags=min(15, max(6, len(z) - 1)),
+            verbose=False,
+            enable_plotting=False,
+            coordinates_type="euclidean"
+        )
+
+        pred_scaled, _ = ok.execute(
+            "points",
+            np.array([(coords[held_out, 0] - x0) / scale]),
+            np.array([(coords[held_out, 1] - y0) / scale]),
+            n_closest_points=min(12, len(z)),
+            backend="loop"
+        )
+        predictions[held_out] = float(
+            np.asarray(np.ma.filled(pred_scaled, np.nan))[0] * z_std + z_mean
+        )
+
+    return predictions
+
 def create_geotiff(
     array,
     transform,
@@ -1947,7 +2010,7 @@ if run_model:
     # GWRCK puntual: se usa la predicción de kriging en la coordenada exacta
     # de cada muestra. No se extrae el píxel más próximo, pues su centro no
     # suele coincidir con la coordenada observada.
-    gwrck_extracted = np.full(
+    gwrck_surface_at_points = np.full(
         len(results["coords"]),
         np.nan,
         dtype=float
@@ -1958,7 +2021,7 @@ if run_model:
         & np.isfinite(results["gwrc_pred"])
     )
 
-    gwrck_extracted[valid_extract] = (
+    gwrck_surface_at_points[valid_extract] = (
         results["gwrc_pred"][valid_extract]
         +
         residual_kriged_points[valid_extract]
@@ -1966,10 +2029,25 @@ if run_model:
 
     observed = data["SOC"].values.astype(float)
 
-    valid_metrics = (
-        np.isfinite(observed)
-        & np.isfinite(gwrck_extracted)
+    # La superficie usa todos los residuos. Para métricas honestas se deja
+    # fuera cada punto antes de kriging (leave-one-out), evitando R² = 1.
+    with st.spinner("Calculando validación cruzada leave-one-out del kriging..."):
+        residual_kriged_loo = krige_residuals_leave_one_out(
+            results["coords"],
+            results["gwrc_residuals"]
+        )
+
+    gwrck_loo = np.full(len(results["coords"]), np.nan, dtype=float)
+    valid_loo = (
+        np.isfinite(residual_kriged_loo)
+        & np.isfinite(results["gwrc_pred"])
     )
+    gwrck_loo[valid_loo] = (
+        results["gwrc_pred"][valid_loo]
+        + residual_kriged_loo[valid_loo]
+    )
+
+    valid_metrics = np.isfinite(observed) & np.isfinite(gwrck_loo)
 
     n_gwrc_raster = int(
         np.sum(np.isfinite(raster_gwrc))
@@ -2017,19 +2095,19 @@ if run_model:
 
         gwrck_r2 = r2_score(
             observed[valid_metrics],
-            gwrck_extracted[valid_metrics]
+            gwrck_loo[valid_metrics]
         )
 
         gwrck_rmse = np.sqrt(
             mean_squared_error(
                 observed[valid_metrics],
-                gwrck_extracted[valid_metrics]
+                gwrck_loo[valid_metrics]
             )
         )
 
         gwrck_mae = mean_absolute_error(
             observed[valid_metrics],
-            gwrck_extracted[valid_metrics]
+            gwrck_loo[valid_metrics]
         )
 
     else:
@@ -2044,12 +2122,14 @@ if run_model:
         "SOC_Observed": observed,
         "SOC_GWRC": results["gwrc_pred"],
         "Residual_GWRC": results["gwrc_residuals"],
-        "Residual_GWRC_Kriged": residual_kriged_points,
-        "SOC_GWRCK_Extracted": gwrck_extracted
+        "Residual_Kriged_Surface": residual_kriged_points,
+        "SOC_GWRCK_Surface": gwrck_surface_at_points,
+        "Residual_Kriged_LOO": residual_kriged_loo,
+        "SOC_GWRCK_LOO": gwrck_loo
     })
 
     gwrck_metrics_row = pd.DataFrame({
-        "Model": ["GWRCK"],
+        "Model": ["GWRCK (LOO)"],
         "N": [int(np.sum(valid_metrics))],
         "Variables": [len(VARS_MODEL)],
         "Bandwidth": [selected_bandwidth],
