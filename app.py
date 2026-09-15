@@ -13,7 +13,7 @@ from streamlit_folium import st_folium
 
 
 st.set_page_config(
-    page_title="SOC Viewer | Amojú River Valley",
+    page_title="SOC Viewer | Amoju River Valley",
     page_icon="🌎",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -41,31 +41,69 @@ MAP_HEIGHT = 700
 st.markdown(
     """
     <style>
-        .main-title {
-            text-align: center;
-            margin-bottom: 0.2rem;
+        .block-container {
+            max-width: 1500px;
+            padding-top: 1.5rem;
+            padding-bottom: 1rem;
         }
 
-        .main-subtitle {
-            text-align: center;
-            color: #5f6368;
-            font-size: 1.05rem;
-            margin-bottom: 1.5rem;
+        .hero-title {
+            font-size: 2.35rem;
+            line-height: 1.12;
+            font-weight: 700;
+            margin: 0 0 0.45rem 0;
         }
 
-        .viewer-note {
-            background: rgba(240, 244, 248, 0.75);
-            border-radius: 10px;
-            padding: 0.8rem 1rem;
-            margin-bottom: 1rem;
-            border: 1px solid rgba(120, 120, 120, 0.18);
+        .hero-location {
+            color: #667085;
+            font-size: 1rem;
+            margin-bottom: 1.25rem;
+        }
+
+        .context-card {
+            background: #f6f8fa;
+            border: 1px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 1.05rem 1.15rem;
+            margin: 0.5rem 0 1rem 0;
+            line-height: 1.58;
+        }
+
+        .section-card {
+            border-left: 4px solid #6b7280;
+            padding: 0.15rem 0 0.15rem 0.9rem;
+            margin: 1rem 0;
+        }
+
+        .query-card {
+            background: #f8fafc;
+            border: 1px solid #dbe3ea;
+            border-radius: 12px;
+            padding: 0.9rem 1rem;
+            margin-top: 0.75rem;
+        }
+
+        .query-title {
+            font-weight: 700;
+            margin-bottom: 0.35rem;
+        }
+
+        .map-label {
+            font-weight: 650;
+            margin-bottom: 0.35rem;
         }
 
         .footer-note {
             text-align: center;
             color: #6b7280;
-            font-size: 0.85rem;
-            margin-top: 1.5rem;
+            font-size: 0.82rem;
+            margin-top: 1.2rem;
+        }
+
+        @media (max-width: 900px) {
+            .hero-title {
+                font-size: 1.8rem;
+            }
         }
     </style>
     """,
@@ -476,31 +514,6 @@ def create_soc_map(gwrc_path, gwrck_path):
 # INTERFAZ FINAL DEL VISOR
 # -----------------------------------------------------------------------------
 
-st.markdown(
-    '<h1 class="main-title">Soil Organic Carbon Content and Spatial Distribution in the Amojú River Valley</h1>',
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    '<div class="main-subtitle">Amojú River Valley, Jaén, Peru</div>',
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    """
-    <div class="viewer-note">
-        <b>Soil Organic Carbon Viewer</b><br>
-        Rice cultivation is an important agricultural resource in the Amojú River Valley in northwestern Peru.
-        This spatial map of soil organic carbon content and distribution provides a tool for identifying
-        spatial patterns of soil carbon across agricultural areas and can support the development of soil
-        conservation and sustainable land management strategies for rice production. The GWRC and GWRCK
-        model results were previously processed and are provided directly through this viewer.
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-
-
 # -----------------------------------------------------------------------------
 # COMPROBACIÓN DE LOS RESULTADOS PRECALCULADOS
 # -----------------------------------------------------------------------------
@@ -518,50 +531,155 @@ if missing_files:
         "The following result files required by the viewer were not found: "
         + ", ".join(missing_files)
     )
-
     st.info(
         "Place the final GeoTIFF files inside the project's 'data' folder before deploying the application. "
         "End users do not need to upload any files."
     )
-
     st.stop()
 
+# Single-screen landing layout: information on the left and the interactive
+# spatial viewer on the right.
+left_col, right_col = st.columns([0.38, 0.62], gap="large")
 
-st.subheader("Spatial visualization")
-
-st.write(
-    "Use the layer control in the upper-right corner of the map to turn GWRC and GWRCK on or off. "
-    "Click anywhere within the study area to retrieve the SOC value of the corresponding 30 × 30 m pixel."
-)
-
-
-with st.spinner("Loading SOC map..."):
-    soc_map = create_soc_map(
-        GWRC_FILE,
-        GWRCK_FILE
+with left_col:
+    st.markdown(
+        '<div class="hero-title">Soil Organic Carbon Content and Spatial Distribution in the Amoju River Valley</div>',
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        '<div class="hero-location">Amoju River Valley, Jaen, Peru</div>',
+        unsafe_allow_html=True
     )
 
-map_data = st_folium(
-    soc_map,
-    width=None,
-    height=MAP_HEIGHT,
-    returned_objects=["last_clicked"]
-)
+    st.markdown(
+        """
+        <div class="context-card">
+        The Amoju River Valley in northwestern Peru is an important agricultural area where
+        rice cultivation represents a key productive resource. Soil organic carbon is an
+        important component of soil functioning because its spatial distribution is related
+        to soil quality, nutrient dynamics, and the capacity of agricultural soils to retain
+        and cycle carbon.
+        <br><br>
+        This interactive map presents the spatial distribution of soil organic carbon estimated
+        using the <b>GWRC</b> and <b>GWRCK</b> models. The resulting spatial information can help
+        identify patterns and areas with contrasting soil carbon content across the agricultural
+        landscape and support the planning of soil conservation and sustainable soil management
+        strategies for rice production in the Amoju River Valley.
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.markdown('<div class="section-card"><b>How to use the viewer</b></div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+        1. Use the **Layer control** on the map to switch between GWRC and GWRCK.
+        2. Zoom to the area of interest.
+        3. **Click on any pixel** to retrieve its SOC value.
+        4. The value is read from the original 30 × 30 m GeoTIFF.
+        """
+    )
+
+    st.markdown('<div class="section-card"><b>Spatial models</b></div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+        **GWRC** — Geographically Weighted Regression with local ridge correction.  
+        **GWRCK** — GWRC combined with kriged GWRC residuals.
+        """
+    )
+
+    query_placeholder = st.empty()
+
+with right_col:
+    st.markdown('<div class="map-label">Interactive SOC spatial distribution</div>', unsafe_allow_html=True)
+    st.caption(
+        "Click on the map to retrieve the SOC content of the corresponding 30 × 30 m pixel. "
+        "The two model layers use a common scale for comparison."
+    )
+
+    with st.spinner("Loading SOC map..."):
+        soc_map = create_soc_map(
+            GWRC_FILE,
+            GWRCK_FILE
+        )
+
+    map_data = st_folium(
+        soc_map,
+        width=None,
+        height=MAP_HEIGHT,
+        returned_objects=["last_clicked"]
+    )
 
 click_data = map_data.get("last_clicked") if map_data else None
 
-if click_data:
-    _show_pixel_query(click_data)
-else:
-    st.info(
-        "Click on the map to retrieve the SOC value of the selected pixel for GWRC and GWRCK."
-    )
+# The query result is placed in the left column so the map and information remain
+# visible together on the landing screen.
+with query_placeholder.container():
+    if click_data:
+        lat = float(click_data["lat"])
+        lon = float(click_data["lng"])
 
+        gwrc_value, gwrc_row, gwrc_col = _query_raster_value(
+            GWRC_FILE,
+            lon,
+            lat
+        )
+        gwrck_value, _, _ = _query_raster_value(
+            GWRCK_FILE,
+            lon,
+            lat
+        )
+
+        pixel_lat = lat
+        pixel_lon = lon
+        if gwrc_value is not None:
+            with rasterio.open(GWRC_FILE) as src:
+                xs, ys = rio_transform("EPSG:4326", src.crs, [lon], [lat])
+                row, col = src.index(xs[0], ys[0])
+                cx, cy = rasterio.transform.xy(src.transform, row, col, offset="center")
+                plon, plat = rio_transform(src.crs, "EPSG:4326", [cx], [cy])
+                pixel_lon = float(plon[0])
+                pixel_lat = float(plat[0])
+
+        st.markdown('<div class="query-card">', unsafe_allow_html=True)
+        st.markdown('<div class="query-title">SOC Value of the Selected Pixel</div>', unsafe_allow_html=True)
+        st.caption(f"Pixel center: {pixel_lat:.6f}°, {pixel_lon:.6f}°")
+
+        q1, q2 = st.columns(2)
+        with q1:
+            st.metric(
+                "GWRC",
+                f"{gwrc_value:.2f} Mg ha⁻¹" if gwrc_value is not None else "No data"
+            )
+        with q2:
+            st.metric(
+                "GWRCK",
+                f"{gwrck_value:.2f} Mg ha⁻¹" if gwrck_value is not None else "No data"
+            )
+
+        if gwrc_row is not None and gwrc_col is not None:
+            st.caption(f"GWRC raster cell: row {gwrc_row + 1}, column {gwrc_col + 1}")
+        st.markdown('</div>', unsafe_allow_html=True)
+    else:
+        st.info(
+            "Click on a pixel in the map to display its GWRC and GWRCK SOC values."
+        )
+
+# Additional information remains below the main two-column landing section.
+st.divider()
+st.markdown(
+    """
+    **Data interpretation**  
+    SOC values are expressed as **Mg ha⁻¹**. Each pixel represents a 30 × 30 m spatial unit.
+    The displayed model results were previously processed and are provided directly through
+    this viewer; no model recalculation is performed by the application.
+    """
+)
 
 st.markdown(
     """
     <div class="footer-note">
-        SOC expressed in Mg ha⁻¹ · Spatial models: GWRC and GWRCK
+        Soil Organic Carbon Viewer · GWRC and GWRCK spatial models · Amoju River Valley, Jaen, Peru
     </div>
     """,
     unsafe_allow_html=True
