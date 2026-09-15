@@ -6,16 +6,9 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import rasterio
-import geopandas as gpd
 
-from rasterio.features import geometry_mask, bounds as geometry_bounds
 from rasterio.transform import from_origin
-from rasterio.warp import (
-    reproject,
-    Resampling,
-    transform_bounds
-)
-from rasterio.windows import Window, transform as window_transform
+from rasterio.warp import reproject, Resampling, transform_bounds
 
 from pyproj import Transformer
 
@@ -729,160 +722,6 @@ def run_gwr_gwrc(
     }
 
 
-def load_clip_shape(
-    uploaded_shape
-):
-
-    """Carga un shapefile ZIP y lo transforma al CRS de trabajo."""
-
-    if uploaded_shape is None:
-        return None
-
-    temp_shape_dir = tempfile.mkdtemp(
-        prefix="gwrck_shape_"
-    )
-
-    with zipfile.ZipFile(uploaded_shape) as z:
-
-        shp_files = [
-            name
-            for name in z.namelist()
-            if name.lower().endswith(".shp")
-            and not name.startswith("__MACOSX/")
-        ]
-
-        if len(shp_files) != 1:
-            raise ValueError(
-                "El ZIP debe contener exactamente un archivo .shp junto con "
-                "sus archivos .shx, .dbf y .prj."
-            )
-
-        z.extractall(temp_shape_dir)
-
-    shape_path = os.path.join(
-        temp_shape_dir,
-        shp_files[0]
-    )
-
-    # Se utiliza pyogrio mediante GeoPandas, ya disponible en Streamlit Cloud
-    # con las dependencias actuales del proyecto. Así no se requiere Fiona.
-    shape_gdf = gpd.read_file(
-        shape_path,
-        engine="pyogrio"
-    )
-
-    if shape_gdf.crs is None:
-        raise ValueError(
-            "El shapefile no tiene un sistema de coordenadas definido."
-        )
-
-    shape_gdf = shape_gdf[
-        shape_gdf.geometry.notna()
-    ].copy()
-
-    if shape_gdf.empty:
-        raise ValueError(
-            "El shapefile no contiene geometrías válidas."
-        )
-
-    shape_gdf = shape_gdf.to_crs(TARGET_CRS)
-
-    geometries_target = [
-        geometry.__geo_interface__
-        for geometry in shape_gdf.geometry
-    ]
-
-    return geometries_target
-
-
-def clip_rasters_to_shape(
-    arrays,
-    transform,
-    clip_geometries
-):
-
-    """Aplica Clip Raster tras terminar todos los cálculos espaciales.
-
-    Las matrices recibidas ya contienen los resultados completos de GWR,
-    GWRC, kriging y GWRCK. Esta función solo convierte en NoData las celdas
-    exteriores al polígono: no cambia las predicciones ni el kriging.
-    """
-
-    if clip_geometries is None:
-        height, width = arrays[0].shape
-        return arrays, transform, width, height
-
-    height, width = arrays[0].shape
-
-    # Clip Raster conserva los valores de píxel; solo reduce la extensión al
-    # rectángulo envolvente del shape y deja NoData fuera de la geometría.
-    shape_bounds = [
-        geometry_bounds(geometry)
-        for geometry in clip_geometries
-    ]
-
-    left = min(bounds[0] for bounds in shape_bounds)
-    bottom = min(bounds[1] for bounds in shape_bounds)
-    right = max(bounds[2] for bounds in shape_bounds)
-    top = max(bounds[3] for bounds in shape_bounds)
-
-    col_start, row_start = ~transform * (left, top)
-    col_stop, row_stop = ~transform * (right, bottom)
-
-    col_start = max(0, int(np.floor(col_start)))
-    row_start = max(0, int(np.floor(row_start)))
-    col_stop = min(width, int(np.ceil(col_stop)))
-    row_stop = min(height, int(np.ceil(row_stop)))
-
-    if col_start >= col_stop or row_start >= row_stop:
-        raise ValueError(
-            "El shapefile no se superpone con los resultados raster."
-        )
-
-    crop_window = Window(
-        col_start,
-        row_start,
-        col_stop - col_start,
-        row_stop - row_start
-    )
-
-    clipped_transform = window_transform(
-        crop_window,
-        transform
-    )
-
-    clipped_height = int(crop_window.height)
-    clipped_width = int(crop_window.width)
-
-    clip_mask = geometry_mask(
-        clip_geometries,
-        out_shape=(clipped_height, clipped_width),
-        transform=clipped_transform,
-        invert=True,
-        all_touched=False
-    )
-
-    clipped_arrays = []
-
-    for array in arrays:
-
-        clipped = np.asarray(
-            array,
-            dtype=float
-        )[row_start:row_stop, col_start:col_stop].copy()
-
-        clipped[~clip_mask] = np.nan
-
-        clipped_arrays.append(clipped)
-
-    return (
-        clipped_arrays,
-        clipped_transform,
-        clipped_width,
-        clipped_height
-    )
-
-
 def prepare_rasters(
     uploaded_rasters,
     scaler,
@@ -1594,21 +1433,7 @@ for var in VARS_MODEL:
 
 
 st.subheader(
-    "3. Área opcional de procesamiento"
-)
-
-clip_shape_file = st.file_uploader(
-    "Shapefile de recorte (.zip, opcional)",
-    type=["zip"],
-    help=(
-        "El archivo ZIP debe incluir .shp, .shx, .dbf y .prj. "
-        "Los rásters de salida se limitarán al polígono cargado."
-    )
-)
-
-
-st.subheader(
-    "4. Configuración del bandwidth"
+    "3. Configuración del bandwidth"
 )
 
 bw_mode = st.radio(
@@ -2057,10 +1882,6 @@ if run_model:
         "Preparando rasters..."
     ):
 
-        clip_geometries = load_clip_shape(
-            clip_shape_file
-        )
-
         (
             raster_arrays,
             raster_std,
@@ -2134,38 +1955,6 @@ if run_model:
         raster_gwrc,
         kriged_residual
     )
-
-    # ÚLTIMO PASO ESPACIAL: Clip Raster equivalente a ArcGIS Pro. Los
-    # resultados se calcularon primero sobre toda la grilla continua; aquí se
-    # recortan todos los TIFF con la geometría del shape, sin recalcular nada.
-    (
-        clipped_rasters,
-        transform,
-        width,
-        height
-    ) = clip_rasters_to_shape(
-        [
-            raster_gwr,
-            raster_gwrc,
-            kriged_residual,
-            kriging_variance,
-            raster_gwrck,
-            raster_cn,
-            raster_lambda
-        ],
-        transform,
-        clip_geometries
-    )
-
-    (
-        raster_gwr,
-        raster_gwrc,
-        kriged_residual,
-        kriging_variance,
-        raster_gwrck,
-        raster_cn,
-        raster_lambda
-    ) = clipped_rasters
 
     n_gwrck_after_raster_calculator = int(
         np.sum(np.isfinite(raster_gwrck))
