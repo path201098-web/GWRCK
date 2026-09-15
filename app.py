@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import rasterio
+from rasterio.io import MemoryFile
 
 from rasterio.transform import from_origin
 from rasterio.warp import reproject, Resampling
@@ -2049,32 +2050,57 @@ if run_model:
         kriged_residual
     )
 
-    point_rows, point_cols = rasterio.transform.rowcol(
-        transform,
-        results["coords"][:, 0],
-        results["coords"][:, 1]
-    )
+    # Validación GWRCK en los puntos originales:
+    # se extrae el residuo krigeado del raster en cada punto y se suma
+    # a la predicción GWRC calculada directamente en ese punto.
+    # Esto evita validar contra una segunda predicción GWRC generada
+    # desde los valores estandarizados de los rasters.
+    point_coords = [
+        (float(x), float(y))
+        for x, y in results["coords"]
+    ]
 
-    point_rows = np.asarray(point_rows, dtype=int)
-    point_cols = np.asarray(point_cols, dtype=int)
-
-    valid_point_extract = (
-        (point_rows >= 0)
-        & (point_rows < height)
-        & (point_cols >= 0)
-        & (point_cols < width)
-    )
-
-    gwrck_extracted = np.full(
+    residual_sampled = np.full(
         len(data),
         np.nan,
         dtype=float
     )
 
-    gwrck_extracted[valid_point_extract] = raster_gwrck[
-        point_rows[valid_point_extract],
-        point_cols[valid_point_extract]
-    ]
+    with MemoryFile() as memfile:
+        with memfile.open(
+            driver="GTiff",
+            height=kriged_residual.shape[0],
+            width=kriged_residual.shape[1],
+            count=1,
+            dtype="float64",
+            crs=TARGET_CRS,
+            transform=transform,
+            nodata=np.nan
+        ) as src_residual:
+            src_residual.write(
+                np.asarray(kriged_residual, dtype=np.float64),
+                1
+            )
+
+            sampled = list(
+                rasterio.sample.sample_gen(
+                    src_residual,
+                    point_coords,
+                    indexes=1,
+                    masked=True
+                )
+            )
+
+            for i, value in enumerate(sampled):
+                value = np.ma.asarray(value)
+                if value.size > 0 and not np.ma.is_masked(value[0]):
+                    residual_sampled[i] = float(value[0])
+
+    gwrck_extracted = (
+        results["gwrc_pred"].astype(float)
+        +
+        residual_sampled
+    )
 
     y_eval = data["SOC"].values.astype(float)
     valid_eval = np.isfinite(gwrck_extracted) & np.isfinite(y_eval)
