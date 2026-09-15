@@ -11,7 +11,7 @@ from rasterio.transform import from_origin
 from rasterio.warp import reproject, Resampling, transform_geom
 from rasterio.mask import mask
 from rasterio.io import MemoryFile
-import fiona
+import shapefile
 
 from pyproj import Transformer
 
@@ -1307,23 +1307,69 @@ def extract_clip_geometries(zip_file):
 
             shp_path = candidates[0]
 
-        with fiona.open(shp_path, "r") as src:
-            source_crs = src.crs_wkt or src.crs
-            geometries = [
-                feature["geometry"]
-                for feature in src
-                if feature.get("geometry") is not None
-            ]
+        # Lectura del shapefile mediante PyShp.
+        # Esto evita depender de Fiona/GDAL adicional en Streamlit Cloud.
+        try:
+            reader = shapefile.Reader(shp_path)
+        except Exception as e:
+            raise ValueError(
+                "No se pudo abrir el shapefile de recorte. "
+                "Verifica que el ZIP contenga .shp, .shx y .dbf."
+            ) from e
+
+        geometries = []
+        for shape_record in reader.iterShapeRecords():
+            geometry = shape_record.shape.__geo_interface__
+            if geometry is not None:
+                geometries.append(geometry)
+
+        reader.close()
 
         if len(geometries) == 0:
             raise ValueError(
                 "El shapefile de recorte no contiene geometrías válidas."
             )
 
-        if not source_crs:
+        # El CRS se obtiene del archivo .prj asociado al .shp.
+        prj_path = os.path.splitext(shp_path)[0] + ".prj"
+
+        if not os.path.exists(prj_path):
+            # Algunos ZIP conservan diferencias de mayúsculas/minúsculas.
+            prj_candidates = []
+            shp_base = os.path.splitext(
+                os.path.basename(shp_path)
+            )[0].lower()
+
+            for root, _, files in os.walk(temp_shape_dir):
+                for filename in files:
+                    if (
+                        os.path.splitext(filename)[0].lower() == shp_base
+                        and filename.lower().endswith(".prj")
+                    ):
+                        prj_candidates.append(
+                            os.path.join(root, filename)
+                        )
+
+            if len(prj_candidates) == 1:
+                prj_path = prj_candidates[0]
+
+        if not os.path.exists(prj_path):
             raise ValueError(
                 "El shapefile no tiene información de CRS. "
                 "Incluye el archivo .prj dentro del ZIP."
+            )
+
+        with open(
+            prj_path,
+            "r",
+            encoding="utf-8-sig"
+        ) as prj_file:
+            source_crs = prj_file.read().strip()
+
+        if not source_crs:
+            raise ValueError(
+                "El archivo .prj está vacío. "
+                "No se puede determinar el CRS del shapefile."
             )
 
         target_geometries = [
