@@ -50,6 +50,12 @@ SOURCE_CRS = "EPSG:4326"
 RASTER_RESOLUTION = 30.0
 CN_THRESHOLD = 25.0
 
+# Filtro cartográfico de picos aislados del raster de residuos krigeados.
+# No interviene en la validación LOO ni modifica los residuos de los puntos.
+DESPIKE_WINDOW = 3
+DESPIKE_LOCAL_SD_FACTOR = 3.0
+DESPIKE_GLOBAL_MAD_FACTOR = 4.0
+
 
 def calculate_vif(X, variables):
 
@@ -1147,6 +1153,83 @@ def raster_calculator_add(raster_gwrc, kriged_residual):
     return raster_gwrck
 
 
+def _box_sum(array, radius):
+    """Suma móvil cuadrada ignorando los NaN (implementación vectorizada)."""
+    padded = np.pad(array, radius, mode="constant", constant_values=0.0)
+    integral = np.pad(
+        padded.cumsum(axis=0).cumsum(axis=1),
+        ((1, 0), (1, 0)),
+        mode="constant",
+        constant_values=0.0
+    )
+    size = 2 * radius + 1
+    return (
+        integral[size:, size:]
+        - integral[:-size, size:]
+        - integral[size:, :-size]
+        + integral[:-size, :-size]
+    )
+
+
+def despike_kriged_residual(raster, window=DESPIKE_WINDOW):
+    """Sustituye únicamente picos aislados por el promedio de vecinos.
+
+    La decisión compara cada píxel con sus ocho vecinos y exige además una
+    diferencia grande frente a la escala robusta global (MAD). Por ello no
+    aplana gradientes espaciales normales ni altera los NoData.
+    """
+    if window < 3 or window % 2 == 0:
+        raise ValueError("DESPIKE_WINDOW debe ser un número impar mayor o igual a 3.")
+
+    values = np.asarray(raster, dtype=float)
+    valid = np.isfinite(values)
+    if not np.any(valid):
+        return values.astype(np.float32), 0
+
+    radius = window // 2
+    safe_values = np.where(valid, values, 0.0)
+    counts = _box_sum(valid.astype(float), radius)
+    sums = _box_sum(safe_values, radius)
+    sums_sq = _box_sum(safe_values ** 2, radius)
+
+    # Se excluye el píxel central: se compara contra vecinos, no contra sí mismo.
+    neighbor_count = counts - valid.astype(float)
+    neighbor_sum = sums - safe_values
+    neighbor_sum_sq = sums_sq - safe_values ** 2
+    neighbor_mean = np.divide(
+        neighbor_sum,
+        neighbor_count,
+        out=np.full(values.shape, np.nan),
+        where=neighbor_count > 0
+    )
+    neighbor_var = np.divide(
+        neighbor_sum_sq,
+        neighbor_count,
+        out=np.full(values.shape, np.nan),
+        where=neighbor_count > 0
+    ) - neighbor_mean ** 2
+    neighbor_std = np.sqrt(np.maximum(neighbor_var, 0.0))
+
+    median = float(np.nanmedian(values))
+    robust_scale = 1.4826 * float(np.nanmedian(np.abs(values[valid] - median)))
+    if not np.isfinite(robust_scale) or robust_scale == 0:
+        robust_scale = float(np.nanstd(values[valid]))
+
+    threshold = np.maximum(
+        DESPIKE_LOCAL_SD_FACTOR * neighbor_std,
+        DESPIKE_GLOBAL_MAD_FACTOR * robust_scale
+    )
+    spikes = (
+        valid
+        & np.isfinite(neighbor_mean)
+        & (np.abs(values - neighbor_mean) > threshold)
+    )
+
+    filtered = values.copy()
+    filtered[spikes] = neighbor_mean[spikes]
+    return filtered.astype(np.float32), int(np.sum(spikes))
+
+
 def krige_residuals(coords, residuals, grid_x, grid_y, valid_mask=None):
 
     coords = np.asarray(coords, dtype=float)
@@ -1979,7 +2062,7 @@ if run_model:
         (
             kriged_residual,
             kriging_variance,
-            residual_kriged_points
+            _
         ) = krige_residuals(
             results["coords"],
             results["gwrc_residuals"],
@@ -1990,6 +2073,12 @@ if run_model:
 
     # El resultado anterior es el raster espacial interpolado de los residuos:
     # Residual_GWRC_Kriged_30m.tif
+    # Se eliminan sólo picos aislados con el promedio de píxeles vecinos.
+    # Esta etapa es cartográfica y no se usa para las métricas LOO.
+    kriged_residual, n_despiked_pixels = despike_kriged_residual(
+        kriged_residual
+    )
+
     # Raster Calculator equivalente a:
     # SOC_GWRCK = SOC_GWRC + Residual_GWRC_Kriged_30m
     raster_gwrck = raster_calculator_add(
@@ -2007,47 +2096,34 @@ if run_model:
             "Verifica la alineacion entre SOC_GWRC y el raster de residuos krigeados."
         )
 
-    # GWRCK puntual: se usa la predicción de kriging en la coordenada exacta
-    # de cada muestra. No se extrae el píxel más próximo, pues su centro no
-    # suele coincidir con la coordenada observada.
-    gwrck_surface_at_points = np.full(
-        len(results["coords"]),
-        np.nan,
-        dtype=float
+    # Validación solicitada: los valores se extraen directamente de los tres
+    # rasters de 30 m, usando la misma celda que contiene cada punto.
+    point_rows, point_cols = rasterio.transform.rowcol(
+        transform,
+        results["coords"][:, 0],
+        results["coords"][:, 1]
+    )
+    point_rows = np.asarray(point_rows, dtype=int)
+    point_cols = np.asarray(point_cols, dtype=int)
+    inside = (
+        (point_rows >= 0) & (point_rows < height)
+        & (point_cols >= 0) & (point_cols < width)
     )
 
-    valid_extract = (
-        np.isfinite(residual_kriged_points)
-        & np.isfinite(results["gwrc_pred"])
-    )
-
-    gwrck_surface_at_points[valid_extract] = (
-        results["gwrc_pred"][valid_extract]
-        +
-        residual_kriged_points[valid_extract]
-    )
+    raster_gwrc_points = np.full(len(results["coords"]), np.nan, dtype=float)
+    residual_kriged_points = np.full(len(results["coords"]), np.nan, dtype=float)
+    gwrck_raster_points = np.full(len(results["coords"]), np.nan, dtype=float)
+    raster_gwrc_points[inside] = raster_gwrc[point_rows[inside], point_cols[inside]]
+    residual_kriged_points[inside] = kriged_residual[point_rows[inside], point_cols[inside]]
+    gwrck_raster_points[inside] = raster_gwrck[point_rows[inside], point_cols[inside]]
 
     observed = data["SOC"].values.astype(float)
+    valid_metrics = np.isfinite(observed) & np.isfinite(gwrck_raster_points)
 
-    # La superficie usa todos los residuos. Para métricas honestas se deja
-    # fuera cada punto antes de kriging (leave-one-out), evitando R² = 1.
-    with st.spinner("Calculando validación cruzada leave-one-out del kriging..."):
-        residual_kriged_loo = krige_residuals_leave_one_out(
-            results["coords"],
-            results["gwrc_residuals"]
-        )
-
-    gwrck_loo = np.full(len(results["coords"]), np.nan, dtype=float)
-    valid_loo = (
-        np.isfinite(residual_kriged_loo)
-        & np.isfinite(results["gwrc_pred"])
+    st.info(
+        f"Filtro de picos aislados: {n_despiked_pixels:,} píxeles de residuos "
+        "reemplazados por el promedio de sus vecinos."
     )
-    gwrck_loo[valid_loo] = (
-        results["gwrc_pred"][valid_loo]
-        + residual_kriged_loo[valid_loo]
-    )
-
-    valid_metrics = np.isfinite(observed) & np.isfinite(gwrck_loo)
 
     n_gwrc_raster = int(
         np.sum(np.isfinite(raster_gwrc))
@@ -2095,19 +2171,19 @@ if run_model:
 
         gwrck_r2 = r2_score(
             observed[valid_metrics],
-            gwrck_loo[valid_metrics]
+            gwrck_raster_points[valid_metrics]
         )
 
         gwrck_rmse = np.sqrt(
             mean_squared_error(
                 observed[valid_metrics],
-                gwrck_loo[valid_metrics]
+                gwrck_raster_points[valid_metrics]
             )
         )
 
         gwrck_mae = mean_absolute_error(
             observed[valid_metrics],
-            gwrck_loo[valid_metrics]
+            gwrck_raster_points[valid_metrics]
         )
 
     else:
@@ -2120,16 +2196,15 @@ if run_model:
         "X": data["X"].values,
         "Y": data["Y"].values,
         "SOC_Observed": observed,
-        "SOC_GWRC": results["gwrc_pred"],
+        "SOC_GWRC_Point_Model": results["gwrc_pred"],
         "Residual_GWRC": results["gwrc_residuals"],
-        "Residual_Kriged_Surface": residual_kriged_points,
-        "SOC_GWRCK_Surface": gwrck_surface_at_points,
-        "Residual_Kriged_LOO": residual_kriged_loo,
-        "SOC_GWRCK_LOO": gwrck_loo
+        "SOC_GWRC_Raster_30m": raster_gwrc_points,
+        "Residual_Kriged_Raster_30m": residual_kriged_points,
+        "SOC_GWRCK_Raster_30m": gwrck_raster_points
     })
 
     gwrck_metrics_row = pd.DataFrame({
-        "Model": ["GWRCK (LOO)"],
+        "Model": ["GWRCK (Raster 30m)"],
         "N": [int(np.sum(valid_metrics))],
         "Variables": [len(VARS_MODEL)],
         "Bandwidth": [selected_bandwidth],
