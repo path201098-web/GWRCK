@@ -47,11 +47,21 @@ st.markdown(
             padding-bottom: 1rem;
         }
 
+        .hero-card {
+            background: #f8fafc;
+            border: 1px solid #dbe3ea;
+            border-radius: 16px;
+            padding: 1.35rem 1.45rem;
+            margin-bottom: 0.75rem;
+            box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
+        }
+
         .hero-title {
-            font-size: 2.35rem;
-            line-height: 1.12;
-            font-weight: 700;
-            margin: 0 0 0.45rem 0;
+            font-size: 2.15rem;
+            line-height: 1.13;
+            font-weight: 750;
+            margin: 0;
+            letter-spacing: -0.02em;
         }
 
         .hero-location {
@@ -83,6 +93,12 @@ st.markdown(
             margin-top: 0.75rem;
         }
 
+        .query-panel-title {
+            font-size: 1.05rem;
+            font-weight: 700;
+            margin: 0.25rem 0 0.15rem 0;
+        }
+
         .query-title {
             font-weight: 700;
             margin-bottom: 0.35rem;
@@ -102,7 +118,7 @@ st.markdown(
 
         @media (max-width: 900px) {
             .hero-title {
-                font-size: 1.8rem;
+                font-size: 1.65rem;
             }
         }
     </style>
@@ -543,11 +559,12 @@ left_col, right_col = st.columns([0.38, 0.62], gap="large")
 
 with left_col:
     st.markdown(
-        '<div class="hero-title">Soil Organic Carbon Content and Spatial Distribution in the Amoju River Valley</div>',
-        unsafe_allow_html=True
-    )
-    st.markdown(
-        '<div class="hero-location">Amoju River Valley, Jaen, Peru</div>',
+        '''
+        <div class="hero-card">
+            <div class="hero-title">Soil Organic Carbon Content and Spatial Distribution in the Amoju River Valley</div>
+            <div class="hero-location">Amoju River Valley, Jaen, Peru</div>
+        </div>
+        ''',
         unsafe_allow_html=True
     )
 
@@ -588,8 +605,6 @@ with left_col:
         """
     )
 
-    query_placeholder = st.empty()
-
 with right_col:
     st.markdown('<div class="map-label">Interactive SOC spatial distribution</div>', unsafe_allow_html=True)
     st.caption(
@@ -610,61 +625,60 @@ with right_col:
         returned_objects=["last_clicked"]
     )
 
-click_data = map_data.get("last_clicked") if map_data else None
+    click_data = map_data.get("last_clicked") if map_data else None
 
-# The query result is placed in the left column so the map and information remain
-# visible together on the landing screen.
-with query_placeholder.container():
-    if click_data:
-        lat = float(click_data["lat"])
-        lon = float(click_data["lng"])
+    # Pixel information is intentionally displayed below the map on the right.
+    st.markdown('<div class="query-panel-title">Pixel information</div>', unsafe_allow_html=True)
+    with st.container():
+        if click_data:
+            lat = float(click_data["lat"])
+            lon = float(click_data["lng"])
 
-        gwrc_value, gwrc_row, gwrc_col = _query_raster_value(
-            GWRC_FILE,
-            lon,
-            lat
-        )
-        gwrck_value, _, _ = _query_raster_value(
-            GWRCK_FILE,
-            lon,
-            lat
-        )
-
-        pixel_lat = lat
-        pixel_lon = lon
-        if gwrc_value is not None:
-            with rasterio.open(GWRC_FILE) as src:
-                xs, ys = rio_transform("EPSG:4326", src.crs, [lon], [lat])
-                row, col = src.index(xs[0], ys[0])
-                cx, cy = rasterio.transform.xy(src.transform, row, col, offset="center")
-                plon, plat = rio_transform(src.crs, "EPSG:4326", [cx], [cy])
-                pixel_lon = float(plon[0])
-                pixel_lat = float(plat[0])
-
-        st.markdown('<div class="query-card">', unsafe_allow_html=True)
-        st.markdown('<div class="query-title">SOC Value of the Selected Pixel</div>', unsafe_allow_html=True)
-        st.caption(f"Pixel center: {pixel_lat:.6f}°, {pixel_lon:.6f}°")
-
-        q1, q2 = st.columns(2)
-        with q1:
-            st.metric(
-                "GWRC",
-                f"{gwrc_value:.2f} Mg ha⁻¹" if gwrc_value is not None else "No data"
+            gwrc_value, gwrc_row, gwrc_col = _query_raster_value(
+                GWRC_FILE,
+                lon,
+                lat
             )
-        with q2:
-            st.metric(
-                "GWRCK",
-                f"{gwrck_value:.2f} Mg ha⁻¹" if gwrck_value is not None else "No data"
+            gwrck_value, _, _ = _query_raster_value(
+                GWRCK_FILE,
+                lon,
+                lat
             )
 
-        if gwrc_row is not None and gwrc_col is not None:
-            st.caption(f"GWRC raster cell: row {gwrc_row + 1}, column {gwrc_col + 1}")
-        st.markdown('</div>', unsafe_allow_html=True)
-    else:
-        st.info(
-            "Click on a pixel in the map to display its GWRC and GWRCK SOC values."
-        )
+            pixel_lat = lat
+            pixel_lon = lon
+            if gwrc_value is not None:
+                with rasterio.open(GWRC_FILE) as src:
+                    xs, ys = rio_transform("EPSG:4326", src.crs, [lon], [lat])
+                    row, col = src.index(xs[0], ys[0])
+                    cx, cy = rasterio.transform.xy(src.transform, row, col, offset="center")
+                    plon, plat = rio_transform(src.crs, "EPSG:4326", [cx], [cy])
+                    pixel_lon = float(plon[0])
+                    pixel_lat = float(plat[0])
 
+            st.markdown('<div class="query-card">', unsafe_allow_html=True)
+            st.markdown('<div class="query-title">SOC Value of the Selected Pixel</div>', unsafe_allow_html=True)
+            st.caption(f"Pixel center: {pixel_lat:.6f}°, {pixel_lon:.6f}°")
+
+            q1, q2 = st.columns(2)
+            with q1:
+                st.metric(
+                    "GWRC",
+                    f"{gwrc_value:.2f} Mg ha⁻¹" if gwrc_value is not None else "No data"
+                )
+            with q2:
+                st.metric(
+                    "GWRCK",
+                    f"{gwrck_value:.2f} Mg ha⁻¹" if gwrck_value is not None else "No data"
+                )
+
+            if gwrc_row is not None and gwrc_col is not None:
+                st.caption(f"GWRC raster cell: row {gwrc_row + 1}, column {gwrc_col + 1}")
+            st.markdown('</div>', unsafe_allow_html=True)
+        else:
+            st.info(
+                "Click on a pixel in the map to display its GWRC and GWRCK SOC values."
+            )
 # Additional information remains below the main two-column landing section.
 st.divider()
 st.markdown(
