@@ -2144,17 +2144,17 @@ if run_model:
             gwrck_point_prediction
     })
 
-        gwrck_metrics_row = pd.DataFrame({
-        "Model": ["GWRCK (GWRC + Kriged Residuals 30m)"],
-        "N": [int(np.sum(valid_metrics))],
-        "Variables": [len(VARS_MODEL)],
-        "Bandwidth": [selected_bandwidth],
-        "R2": [gwrck_r2],
-        "RMSE": [gwrck_rmse],
-        "MAE": [gwrck_mae],
-        "AIC": [np.nan],
-        "AICc": [np.nan]
-    })
+    gwrck_metrics_row = pd.DataFrame({
+    "Model": ["GWRCK (GWRC + Kriged Residuals 30m)"],
+    "N": [int(np.sum(valid_metrics))],
+    "Variables": [len(VARS_MODEL)],
+    "Bandwidth": [selected_bandwidth],
+    "R2": [gwrck_r2],
+    "RMSE": [gwrck_rmse],
+    "MAE": [gwrck_mae],
+    "AIC": [np.nan],
+    "AICc": [np.nan]
+})
 
     results["results_table"] = pd.concat(
         [results["results_table"], gwrck_metrics_row],
