@@ -8,13 +8,14 @@ import streamlit as st
 import rasterio
 import geopandas as gpd
 
-from rasterio.features import geometry_mask
+from rasterio.features import geometry_mask, bounds as geometry_bounds
 from rasterio.transform import from_origin
 from rasterio.warp import (
     reproject,
     Resampling,
     transform_bounds
 )
+from rasterio.windows import Window, transform as window_transform
 
 from pyproj import Transformer
 
@@ -808,14 +809,55 @@ def clip_rasters_to_shape(
     """
 
     if clip_geometries is None:
-        return arrays, None
+        height, width = arrays[0].shape
+        return arrays, transform, width, height
 
     height, width = arrays[0].shape
 
+    # Clip Raster conserva los valores de píxel; solo reduce la extensión al
+    # rectángulo envolvente del shape y deja NoData fuera de la geometría.
+    shape_bounds = [
+        geometry_bounds(geometry)
+        for geometry in clip_geometries
+    ]
+
+    left = min(bounds[0] for bounds in shape_bounds)
+    bottom = min(bounds[1] for bounds in shape_bounds)
+    right = max(bounds[2] for bounds in shape_bounds)
+    top = max(bounds[3] for bounds in shape_bounds)
+
+    col_start, row_start = ~transform * (left, top)
+    col_stop, row_stop = ~transform * (right, bottom)
+
+    col_start = max(0, int(np.floor(col_start)))
+    row_start = max(0, int(np.floor(row_start)))
+    col_stop = min(width, int(np.ceil(col_stop)))
+    row_stop = min(height, int(np.ceil(row_stop)))
+
+    if col_start >= col_stop or row_start >= row_stop:
+        raise ValueError(
+            "El shapefile no se superpone con los resultados raster."
+        )
+
+    crop_window = Window(
+        col_start,
+        row_start,
+        col_stop - col_start,
+        row_stop - row_start
+    )
+
+    clipped_transform = window_transform(
+        crop_window,
+        transform
+    )
+
+    clipped_height = int(crop_window.height)
+    clipped_width = int(crop_window.width)
+
     clip_mask = geometry_mask(
         clip_geometries,
-        out_shape=(height, width),
-        transform=transform,
+        out_shape=(clipped_height, clipped_width),
+        transform=clipped_transform,
         invert=True,
         all_touched=False
     )
@@ -827,13 +869,18 @@ def clip_rasters_to_shape(
         clipped = np.asarray(
             array,
             dtype=float
-        ).copy()
+        )[row_start:row_stop, col_start:col_stop].copy()
 
         clipped[~clip_mask] = np.nan
 
         clipped_arrays.append(clipped)
 
-    return clipped_arrays, clip_mask
+    return (
+        clipped_arrays,
+        clipped_transform,
+        clipped_width,
+        clipped_height
+    )
 
 
 def prepare_rasters(
@@ -2093,7 +2140,9 @@ if run_model:
     # recortan todos los TIFF con la geometría del shape, sin recalcular nada.
     (
         clipped_rasters,
-        clip_mask
+        transform,
+        width,
+        height
     ) = clip_rasters_to_shape(
         [
             raster_gwr,
