@@ -2,16 +2,17 @@ import os
 import zipfile
 import tempfile
 
+import shapefile
+from rasterio.mask import mask
+from rasterio.warp import transform_geom
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 import rasterio
 
 from rasterio.transform import from_origin
-from rasterio.warp import reproject, Resampling, transform_geom
-from rasterio.mask import mask
-from rasterio.io import MemoryFile
-import shapefile
+from rasterio.warp import reproject, Resampling
 
 from pyproj import Transformer
 
@@ -366,7 +367,7 @@ def apply_gwrc(
             corrected_betas[
                 i,
                 1:
-            ] = beta_ridge.flatten()
+            ] = beta_ridge.flatten()[1:]
 
         except np.linalg.LinAlgError:
 
@@ -1260,209 +1261,122 @@ def krige_residuals(
     )
 
 
-def extract_clip_geometries(zip_file):
+def extract_clip_geometries(uploaded_zip):
+    """Extrae el shapefile del ZIP y transforma sus geometrías a TARGET_CRS."""
+    if uploaded_zip is None:
+        return None
 
-    temp_shape_dir = tempfile.mkdtemp()
+    extract_dir = tempfile.mkdtemp()
+    zip_path = os.path.join(extract_dir, "clip_area.zip")
 
-    try:
-        with zipfile.ZipFile(zip_file) as z:
-            members = z.namelist()
-            shapefile_members = [
-                name for name in members
-                if name.lower().endswith(".shp")
-            ]
+    with open(zip_path, "wb") as f:
+        f.write(uploaded_zip.getvalue())
 
-            if len(shapefile_members) == 0:
-                raise ValueError(
-                    "El ZIP del área de recorte no contiene ningún archivo .shp."
-                )
+    with zipfile.ZipFile(zip_path, "r") as z:
+        z.extractall(extract_dir)
 
-            if len(shapefile_members) > 1:
-                raise ValueError(
-                    "El ZIP contiene más de un shapefile .shp. "
-                    "Deja únicamente el shapefile del área que deseas utilizar."
-                )
+    shp_files = []
+    for root, _, files in os.walk(extract_dir):
+        for name in files:
+            if name.lower().endswith(".shp"):
+                shp_files.append(os.path.join(root, name))
 
-            z.extractall(temp_shape_dir)
-
-        shp_name = shapefile_members[0]
-        shp_path = os.path.join(
-            temp_shape_dir,
-            shp_name
+    if len(shp_files) != 1:
+        raise ValueError(
+            "El ZIP del área de recorte debe contener exactamente un archivo .shp."
         )
 
-        if not os.path.exists(shp_path):
-            candidates = []
-            for root, _, files in os.walk(temp_shape_dir):
-                for filename in files:
-                    if filename.lower().endswith(".shp"):
-                        candidates.append(
-                            os.path.join(root, filename)
-                        )
+    shp_path = shp_files[0]
+    prj_path = os.path.splitext(shp_path)[0] + ".prj"
 
-            if len(candidates) != 1:
-                raise ValueError(
-                    "No se pudo localizar correctamente el shapefile dentro del ZIP."
-                )
-
-            shp_path = candidates[0]
-
-        # Lectura del shapefile mediante PyShp.
-        # Esto evita depender de Fiona/GDAL adicional en Streamlit Cloud.
-        try:
-            reader = shapefile.Reader(shp_path)
-        except Exception as e:
-            raise ValueError(
-                "No se pudo abrir el shapefile de recorte. "
-                "Verifica que el ZIP contenga .shp, .shx y .dbf."
-            ) from e
-
-        geometries = []
-        for shape_record in reader.iterShapeRecords():
-            geometry = shape_record.shape.__geo_interface__
-            if geometry is not None:
-                geometries.append(geometry)
-
-        reader.close()
-
-        if len(geometries) == 0:
-            raise ValueError(
-                "El shapefile de recorte no contiene geometrías válidas."
-            )
-
-        # El CRS se obtiene del archivo .prj asociado al .shp.
-        prj_path = os.path.splitext(shp_path)[0] + ".prj"
-
-        if not os.path.exists(prj_path):
-            # Algunos ZIP conservan diferencias de mayúsculas/minúsculas.
-            prj_candidates = []
-            shp_base = os.path.splitext(
-                os.path.basename(shp_path)
-            )[0].lower()
-
-            for root, _, files in os.walk(temp_shape_dir):
-                for filename in files:
-                    if (
-                        os.path.splitext(filename)[0].lower() == shp_base
-                        and filename.lower().endswith(".prj")
-                    ):
-                        prj_candidates.append(
-                            os.path.join(root, filename)
-                        )
-
-            if len(prj_candidates) == 1:
-                prj_path = prj_candidates[0]
-
-        if not os.path.exists(prj_path):
-            raise ValueError(
-                "El shapefile no tiene información de CRS. "
-                "Incluye el archivo .prj dentro del ZIP."
-            )
-
-        with open(
-            prj_path,
-            "r",
-            encoding="utf-8-sig"
-        ) as prj_file:
-            source_crs = prj_file.read().strip()
-
-        if not source_crs:
-            raise ValueError(
-                "El archivo .prj está vacío. "
-                "No se puede determinar el CRS del shapefile."
-            )
-
-        target_geometries = [
-            transform_geom(
-                source_crs,
-                TARGET_CRS,
-                geometry,
-                precision=-1
-            )
-            for geometry in geometries
-        ]
-
-        return target_geometries
-
-    finally:
-        # El directorio temporal se mantiene durante el procesamiento
-        # del shapefile y se elimina al finalizar la lectura.
-        import shutil
-        shutil.rmtree(
-            temp_shape_dir,
-            ignore_errors=True
+    if not os.path.exists(prj_path):
+        raise ValueError(
+            "El shapefile del área de recorte debe incluir su archivo .prj."
         )
 
+    with open(prj_path, "r", encoding="utf-8", errors="ignore") as f:
+        source_wkt = f.read()
 
-def clip_raster_arrays(
-    raster_arrays,
-    transform,
-    clip_zip
-):
+    source_crs = rasterio.crs.CRS.from_wkt(source_wkt)
+    reader = shapefile.Reader(shp_path)
 
-    geometries = extract_clip_geometries(
-        clip_zip
-    )
-
-    clipped = {}
-    clipped_transform = None
-
-    for name, array in raster_arrays.items():
-
-        height, width = array.shape
-
-        profile = {
-            "driver": "GTiff",
-            "height": height,
-            "width": width,
-            "count": 1,
-            "dtype": "float32",
-            "crs": TARGET_CRS,
-            "transform": transform,
-            "nodata": np.nan
-        }
-
-        with MemoryFile() as memfile:
-
-            with memfile.open(
-                **profile
-            ) as dataset:
-
-                dataset.write(
-                    np.asarray(
-                        array,
-                        dtype=np.float32
-                    ),
-                    1
+    geometries = []
+    for shape_record in reader.iterShapeRecords():
+        geom = shape_record.shape.__geo_interface__
+        if geom and geom.get("coordinates"):
+            geometries.append(
+                transform_geom(
+                    source_crs,
+                    TARGET_CRS,
+                    geom,
+                    precision=6
                 )
+            )
 
-                out_image, out_transform = mask(
-                    dataset,
-                    geometries,
-                    crop=True,
-                    filled=True,
-                    nodata=np.nan
-                )
+    if not geometries:
+        raise ValueError("El shapefile del área de recorte no contiene geometrías válidas.")
 
-        clipped[name] = out_image[0]
-        clipped_transform = out_transform
-
-    return clipped, clipped_transform
+    return geometries
 
 
-def clip_output_arrays(
-    arrays,
-    transform,
-    clip_zip
-):
+def clip_output_rasters(output_paths, clip_zip):
+    """Recorta únicamente los GeoTIFF ya generados. No modifica ningún cálculo del modelo."""
+    if clip_zip is None:
+        return output_paths
 
-    clipped, clipped_transform = clip_raster_arrays(
-        arrays,
-        transform,
-        clip_zip
-    )
+    geometries = extract_clip_geometries(clip_zip)
 
-    return clipped, clipped_transform
+    clipped_paths = dict(output_paths)
+
+    for key, path in output_paths.items():
+        if not str(path).lower().endswith((".tif", ".tiff")):
+            continue
+
+        temp_path = path + ".clipped.tif"
+
+        with rasterio.open(path) as src:
+            if src.crs is None:
+                raise ValueError(f"El raster {os.path.basename(path)} no tiene CRS definido.")
+
+            if src.crs != rasterio.crs.CRS.from_user_input(TARGET_CRS):
+                raster_geometries = [
+                    transform_geom(
+                        TARGET_CRS,
+                        src.crs,
+                        geom,
+                        precision=6
+                    )
+                    for geom in geometries
+                ]
+            else:
+                raster_geometries = geometries
+
+            clipped, clipped_transform = mask(
+                src,
+                raster_geometries,
+                crop=True,
+                filled=True,
+                nodata=np.nan
+            )
+
+            profile = src.profile.copy()
+            profile.update(
+                height=clipped.shape[1],
+                width=clipped.shape[2],
+                transform=clipped_transform,
+                dtype="float32",
+                count=src.count,
+                nodata=np.nan,
+                compress="deflate"
+            )
+
+            with rasterio.open(temp_path, "w", **profile) as dst:
+                dst.write(clipped.astype(np.float32))
+
+        os.replace(temp_path, path)
+        clipped_paths[key] = path
+
+    return clipped_paths
 
 
 def create_geotiff(
@@ -1627,24 +1541,14 @@ st.subheader(
 )
 
 clip_zip = st.file_uploader(
-    "Sube opcionalmente un ZIP con el shapefile del área de recorte",
+    "ZIP del shapefile del área de recorte",
     type=["zip"],
     key="clip_shapefile_zip",
     help=(
-        "El ZIP debe contener el .shp, .shx, .dbf y .prj del área. "
-        "Si no subes un ZIP, los resultados se generan para toda la extensión."
+        "El ZIP debe contener un único shapefile con .shp, .shx, .dbf y .prj. "
+        "Si no se carga, no se aplica ningún recorte."
     )
 )
-
-if clip_zip is not None:
-    st.info(
-        "Área de recorte activada. Los GeoTIFF generados se recortarán al área del shapefile."
-    )
-else:
-    st.caption(
-        "Sin ZIP: no se aplicará ningún recorte espacial."
-    )
-
 
 st.subheader(
     "4. Configuración del bandwidth"
@@ -2221,54 +2125,6 @@ if run_model:
     final_point_table["SOC_GWRCK_Extracted"] = gwrck_extracted
     results["final_point_table"] = final_point_table
 
-    # El recorte es únicamente espacial y se aplica después de calcular
-    # GWR, GWRC y GWRCK y después de calcular sus métricas.
-    # Por tanto, no modifica el modelo ni sus métricas.
-    output_transform = transform
-
-    if clip_zip is not None:
-
-        with st.spinner(
-            "Aplicando recorte espacial al área seleccionada..."
-        ):
-
-            arrays_to_clip = {
-                "GWR": raster_gwr,
-                "GWRC": raster_gwrc,
-                "Residual_GWRC_Kriged": kriged_residual,
-                "Kriging_Variance": kriging_variance,
-                "GWRCK": raster_gwrck,
-                "CN_Local": raster_cn,
-                "Lambda_Local": raster_lambda
-            }
-
-            try:
-                clipped_arrays, output_transform = clip_output_arrays(
-                    arrays_to_clip,
-                    transform,
-                    clip_zip
-                )
-
-                raster_gwr = clipped_arrays["GWR"]
-                raster_gwrc = clipped_arrays["GWRC"]
-                kriged_residual = clipped_arrays["Residual_GWRC_Kriged"]
-                kriging_variance = clipped_arrays["Kriging_Variance"]
-                raster_gwrck = clipped_arrays["GWRCK"]
-                raster_cn = clipped_arrays["CN_Local"]
-                raster_lambda = clipped_arrays["Lambda_Local"]
-
-                st.success(
-                    "Recorte espacial aplicado correctamente."
-                )
-
-            except Exception as e:
-
-                st.error(
-                    "No fue posible aplicar el shapefile de recorte: "
-                    + str(e)
-                )
-                st.stop()
-
     st.success(
         "GWRCK completado."
     )
@@ -2342,43 +2198,43 @@ if run_model:
 
     create_geotiff(
         raster_gwr,
-        output_transform,
+        transform,
         gwr_path
     )
 
     create_geotiff(
         raster_gwrc,
-        output_transform,
+        transform,
         gwrc_path
     )
 
     create_geotiff(
         kriged_residual,
-        output_transform,
+        transform,
         residual_path
     )
 
     create_geotiff(
         kriging_variance,
-        output_transform,
+        transform,
         variance_path
     )
 
     create_geotiff(
         raster_gwrck,
-        output_transform,
+        transform,
         gwrck_path
     )
 
     create_geotiff(
         raster_cn,
-        output_transform,
+        transform,
         cn_path
     )
 
     create_geotiff(
         raster_lambda,
-        output_transform,
+        transform,
         lambda_path
     )
 
@@ -2398,10 +2254,36 @@ if run_model:
         excel_path
     ]
 
+    output_paths = {
+        "gwr": gwr_path,
+        "gwrc": gwrc_path,
+        "residual": residual_path,
+        "variance": variance_path,
+        "gwrck": gwrck_path,
+        "cn": cn_path,
+        "lambda": lambda_path
+    }
+
+    if clip_zip is not None:
+        with st.spinner("Aplicando recorte espacial al área del shapefile..."):
+            output_paths = clip_output_rasters(output_paths, clip_zip)
+        st.success("Recorte espacial aplicado correctamente a los GeoTIFF. Las métricas del modelo no fueron modificadas.")
+
     zip_path = os.path.join(
         temp_dir,
         "GWRCK_results.zip"
     )
+
+    output_files = [
+        output_paths["gwr"],
+        output_paths["gwrc"],
+        output_paths["residual"],
+        output_paths["variance"],
+        output_paths["gwrck"],
+        output_paths["cn"],
+        output_paths["lambda"],
+        excel_path
+    ]
 
     create_zip(
         output_files,
@@ -2415,21 +2297,21 @@ if run_model:
     col1, col2 = st.columns(2)
 
     with open(
-        gwrc_path,
+        output_paths["gwrc"],
         "rb"
     ) as f:
 
         gwrc_bytes = f.read()
 
     with open(
-        gwrck_path,
+        output_paths["gwrck"],
         "rb"
     ) as f:
 
         gwrck_bytes = f.read()
 
     with open(
-        residual_path,
+        output_paths["residual"],
         "rb"
     ) as f:
 
