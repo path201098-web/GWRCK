@@ -734,63 +734,71 @@ def prepare_rasters(
 
     raster_arrays = {}
 
-    bounds = None
+    raster_crs = None
+    bounds_list = []
 
     for var in VARS_MODEL:
 
-        uploaded_file = (
-            uploaded_rasters[var]
-        )
+        uploaded_file = uploaded_rasters[var]
 
-        with rasterio.open(
-            uploaded_file
-        ) as src:
+        with rasterio.open(uploaded_file) as src:
 
-            left = src.bounds.left
-            bottom = src.bounds.bottom
-            right = src.bounds.right
-            top = src.bounds.top
-
-            if bounds is None:
-
-                bounds = [
-                    left,
-                    bottom,
-                    right,
-                    top
-                ]
-
-            else:
-
-                bounds[0] = min(
-                    bounds[0],
-                    left
+            if src.crs is None:
+                raise ValueError(
+                    f"El raster {var} no tiene CRS definido."
                 )
 
-                bounds[1] = min(
-                    bounds[1],
-                    bottom
-                )
+            if raster_crs is None:
+                raster_crs = src.crs
 
-                bounds[2] = max(
-                    bounds[2],
-                    right
+            bounds_list.append(
+                (
+                    src.bounds.left,
+                    src.bounds.bottom,
+                    src.bounds.right,
+                    src.bounds.top
                 )
+            )
 
-                bounds[3] = max(
-                    bounds[3],
-                    top
-                )
+    left = min(
+        b[0]
+        for b in bounds_list
+    )
 
-    min_x, min_y, max_x, max_y = (
-        bounds
+    bottom = min(
+        b[1]
+        for b in bounds_list
+    )
+
+    right = max(
+        b[2]
+        for b in bounds_list
+    )
+
+    top = max(
+        b[3]
+        for b in bounds_list
+    )
+
+    transformer_bounds = Transformer.from_crs(
+        raster_crs,
+        TARGET_CRS,
+        always_xy=True
+    )
+
+    xmin, ymin = transformer_bounds.transform(
+        left,
+        bottom
+    )
+
+    xmax, ymax = transformer_bounds.transform(
+        right,
+        top
     )
 
     width = int(
         np.ceil(
-            (
-                max_x - min_x
-            )
+            (xmax - xmin)
             /
             RASTER_RESOLUTION
         )
@@ -798,39 +806,41 @@ def prepare_rasters(
 
     height = int(
         np.ceil(
-            (
-                max_y - min_y
-            )
+            (ymax - ymin)
             /
             RASTER_RESOLUTION
         )
     )
 
+    if width <= 0 or height <= 0:
+        raise ValueError(
+            "La extensión espacial de los rasters no es válida "
+            "después de transformar a EPSG:32717."
+        )
+
     transform = from_origin(
-        min_x,
-        max_y,
+        xmin,
+        ymax,
         RASTER_RESOLUTION,
         RASTER_RESOLUTION
     )
 
     for var in VARS_MODEL:
 
-        uploaded_file = (
-            uploaded_rasters[var]
+        uploaded_file = uploaded_rasters[var]
+
+        destination = np.full(
+            (
+                height,
+                width
+            ),
+            np.nan,
+            dtype=np.float32
         )
 
         with rasterio.open(
             uploaded_file
         ) as src:
-
-            destination = np.full(
-                (
-                    height,
-                    width
-                ),
-                np.nan,
-                dtype=np.float32
-            )
 
             reproject(
                 source=rasterio.band(
@@ -846,39 +856,24 @@ def prepare_rasters(
                 dst_nodata=np.nan
             )
 
-            raster_arrays[var] = (
-                destination
-            )
+        raster_arrays[var] = destination
 
     raster_std = {}
 
     for var in VARS_MODEL:
 
-        arr = raster_arrays[var]
+        arr = raster_arrays[var].astype(float)
 
-        mean = np.nanmean(
-            arr
-        )
+        mean = np.nanmean(arr)
+        std = np.nanstd(arr)
 
-        std = np.nanstd(
-            arr
-        )
+        if std == 0 or np.isnan(std):
 
-        if (
-            std == 0
-            or
-            np.isnan(std)
-        ):
-
-            raster_std[var] = (
-                np.zeros_like(arr)
-            )
+            raster_std[var] = np.zeros_like(arr)
 
         else:
 
-            raster_std[var] = (
-                arr - mean
-            ) / std
+            raster_std[var] = (arr - mean) / std
 
     return (
         raster_arrays,
