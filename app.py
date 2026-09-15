@@ -50,12 +50,6 @@ SOURCE_CRS = "EPSG:4326"
 RASTER_RESOLUTION = 30.0
 CN_THRESHOLD = 25.0
 
-# Filtro cartográfico de picos aislados del raster de residuos krigeados.
-# No interviene en la validación LOO ni modifica los residuos de los puntos.
-DESPIKE_WINDOW = 3
-DESPIKE_LOCAL_SD_FACTOR = 3.0
-DESPIKE_GLOBAL_MAD_FACTOR = 4.0
-
 
 def calculate_vif(X, variables):
 
@@ -1140,256 +1134,140 @@ def raster_calculator_add(raster_gwrc, kriged_residual):
 
     if raster_gwrc.shape != kriged_residual.shape:
         raise ValueError(
-            "SOC_GWRC y Residual_GWRC_Kriged deben tener la misma forma. "
-            f"Se recibieron {raster_gwrc.shape} y {kriged_residual.shape}."
+            "SOC_GWRC y Kriged_Residual_GWRC deben tener la misma dimensión."
         )
 
-    raster_gwrck = np.full(raster_gwrc.shape, np.nan, dtype=np.float32)
+    raster_gwrck = np.full(
+        raster_gwrc.shape,
+        np.nan,
+        dtype=float
+    )
 
-    valid = np.isfinite(raster_gwrc) & np.isfinite(kriged_residual)
+    valid = (
+        np.isfinite(raster_gwrc)
+        & np.isfinite(kriged_residual)
+    )
 
-    raster_gwrck[valid] = raster_gwrc[valid] + kriged_residual[valid]
+    raster_gwrck[valid] = (
+        raster_gwrc[valid]
+        + kriged_residual[valid]
+    )
 
     return raster_gwrck
 
 
-def _box_sum(array, radius):
-    """Suma móvil cuadrada ignorando los NaN (implementación vectorizada)."""
-    padded = np.pad(array, radius, mode="constant", constant_values=0.0)
-    integral = np.pad(
-        padded.cumsum(axis=0).cumsum(axis=1),
-        ((1, 0), (1, 0)),
-        mode="constant",
-        constant_values=0.0
-    )
-    size = 2 * radius + 1
-    return (
-        integral[size:, size:]
-        - integral[:-size, size:]
-        - integral[size:, :-size]
-        + integral[:-size, :-size]
+def krige_residuals(
+    coords,
+    residuals,
+    grid_x,
+    grid_y
+):
+
+    valid = (
+        np.isfinite(coords[:, 0])
+        & np.isfinite(coords[:, 1])
+        & np.isfinite(residuals)
     )
 
-
-def despike_kriged_residual(raster, window=DESPIKE_WINDOW):
-    """Sustituye únicamente picos aislados por el promedio de vecinos.
-
-    La decisión compara cada píxel con sus ocho vecinos y exige además una
-    diferencia grande frente a la escala robusta global (MAD). Por ello no
-    aplana gradientes espaciales normales ni altera los NoData.
-    """
-    if window < 3 or window % 2 == 0:
-        raise ValueError("DESPIKE_WINDOW debe ser un número impar mayor o igual a 3.")
-
-    values = np.asarray(raster, dtype=float)
-    valid = np.isfinite(values)
-    if not np.any(valid):
-        return values.astype(np.float32), 0
-
-    radius = window // 2
-    safe_values = np.where(valid, values, 0.0)
-    counts = _box_sum(valid.astype(float), radius)
-    sums = _box_sum(safe_values, radius)
-    sums_sq = _box_sum(safe_values ** 2, radius)
-
-    # Se excluye el píxel central: se compara contra vecinos, no contra sí mismo.
-    neighbor_count = counts - valid.astype(float)
-    neighbor_sum = sums - safe_values
-    neighbor_sum_sq = sums_sq - safe_values ** 2
-    neighbor_mean = np.divide(
-        neighbor_sum,
-        neighbor_count,
-        out=np.full(values.shape, np.nan),
-        where=neighbor_count > 0
-    )
-    neighbor_var = np.divide(
-        neighbor_sum_sq,
-        neighbor_count,
-        out=np.full(values.shape, np.nan),
-        where=neighbor_count > 0
-    ) - neighbor_mean ** 2
-    neighbor_std = np.sqrt(np.maximum(neighbor_var, 0.0))
-
-    median = float(np.nanmedian(values))
-    robust_scale = 1.4826 * float(np.nanmedian(np.abs(values[valid] - median)))
-    if not np.isfinite(robust_scale) or robust_scale == 0:
-        robust_scale = float(np.nanstd(values[valid]))
-
-    threshold = np.maximum(
-        DESPIKE_LOCAL_SD_FACTOR * neighbor_std,
-        DESPIKE_GLOBAL_MAD_FACTOR * robust_scale
-    )
-    spikes = (
-        valid
-        & np.isfinite(neighbor_mean)
-        & (np.abs(values - neighbor_mean) > threshold)
-    )
-
-    filtered = values.copy()
-    filtered[spikes] = neighbor_mean[spikes]
-    return filtered.astype(np.float32), int(np.sum(spikes))
-
-
-def krige_residuals(coords, residuals, grid_x, grid_y, valid_mask=None):
-
-    coords = np.asarray(coords, dtype=float)
-    residuals = np.asarray(residuals, dtype=float).reshape(-1)
-    grid_x = np.asarray(grid_x, dtype=float)
-    grid_y = np.asarray(grid_y, dtype=float)
-
-    valid = np.isfinite(coords).all(axis=1) & np.isfinite(residuals)
-    krig_x = coords[valid, 0]
-    krig_y = coords[valid, 1]
-    z = residuals[valid]
-
-    # PyKrige no puede resolver correctamente puntos con la misma coordenada.
-    locations = np.column_stack((krig_x, krig_y))
-    unique_locations, inverse = np.unique(locations, axis=0, return_inverse=True)
-    if len(unique_locations) != len(locations):
-        z = np.bincount(inverse, weights=z) / np.bincount(inverse)
-        krig_x = unique_locations[:, 0]
-        krig_y = unique_locations[:, 1]
+    krig_x = np.asarray(coords[valid, 0], dtype=float)
+    krig_y = np.asarray(coords[valid, 1], dtype=float)
+    z = np.asarray(residuals[valid], dtype=float)
 
     if len(z) < 3:
-        raise ValueError("Se requieren al menos tres residuos válidos para el kriging.")
+        raise ValueError(
+            "No existen suficientes residuos válidos para realizar el kriging."
+        )
 
-    expected_shape = (len(grid_y), len(grid_x))
     z_mean = float(np.mean(z))
     z_std = float(np.std(z))
 
-    if not np.isfinite(z_std) or z_std == 0:
-        kriged = np.full(expected_shape, z_mean, dtype=float)
-        variance = np.zeros(expected_shape, dtype=float)
-        residual_points = np.full(len(residuals), z_mean, dtype=float)
-    else:
-        # UTM se expresa en km solo para mejorar la estabilidad numérica.
-        x0 = float(np.mean(krig_x))
-        y0 = float(np.mean(krig_y))
-        coord_scale = 1000.0
-        kx = (krig_x - x0) / coord_scale
-        ky = (krig_y - y0) / coord_scale
-        gx = (grid_x - x0) / coord_scale
-        gy = (grid_y - y0) / coord_scale
-        z_scaled = (z - z_mean) / z_std
-
-        ok = OrdinaryKriging(
-            kx, ky, z_scaled,
-            variogram_model="gaussian",
-            nlags=min(15, max(6, len(z) - 1)),
-            verbose=False,
-            enable_plotting=False,
-            coordinates_type="euclidean"
+    if not np.isfinite(z_std) or z_std <= 0:
+        return (
+            np.full((len(grid_y), len(grid_x)), z_mean, dtype=float),
+            np.zeros((len(grid_y), len(grid_x)), dtype=float)
         )
 
-        kriged_scaled, variance_scaled = ok.execute(
-            "grid", np.sort(gx), np.sort(gy),
-            n_closest_points=min(12, len(z)), backend="loop"
-        )
-        points_scaled, _ = ok.execute(
-            "points",
-            (coords[valid, 0] - x0) / coord_scale,
-            (coords[valid, 1] - y0) / coord_scale,
-            n_closest_points=min(12, len(z)), backend="loop"
-        )
+    # Se centran y escalan las coordenadas únicamente para mejorar
+    # la estabilidad numérica del sistema de kriging. Las predicciones
+    # permanecen en las unidades originales del residuo.
+    x0 = float(np.mean(krig_x))
+    y0 = float(np.mean(krig_y))
+    coord_scale = 1000.0
 
-        kriged = np.asarray(np.ma.filled(kriged_scaled, np.nan), dtype=float)
-        kriged = kriged * z_std + z_mean
-        # La varianza se convierte con el cuadrado de la escala del residuo.
-        variance = np.asarray(np.ma.filled(variance_scaled, np.nan), dtype=float)
-        variance = variance * (z_std ** 2)
-        residual_points = np.full(len(residuals), np.nan, dtype=float)
-        residual_points[valid] = (
-            np.asarray(np.ma.filled(points_scaled, np.nan), dtype=float) * z_std + z_mean
-        )
+    kx = (krig_x - x0) / coord_scale
+    ky = (krig_y - y0) / coord_scale
+    gx = (np.asarray(grid_x, dtype=float) - x0) / coord_scale
+    gy = (np.asarray(grid_y, dtype=float) - y0) / coord_scale
 
-        # PyKrige devuelve Y creciente; GeoTIFF usa filas con Y descendente.
-        if len(grid_y) > 1 and grid_y[0] > grid_y[-1]:
-            kriged = np.flipud(kriged)
-            variance = np.flipud(variance)
+    # Estandarización del residuo para evitar problemas de escala.
+    z_scaled = (z - z_mean) / z_std
+
+    # Ordinary Kriging sobre los residuos. Se mantiene el modelo esférico,
+    # que es el utilizado en el flujo espacial del GWRCK.
+    ok = OrdinaryKriging(
+        kx,
+        ky,
+        z_scaled,
+        variogram_model="gaussian",
+        nlags=15,
+        verbose=False,
+        enable_plotting=False,
+        coordinates_type="euclidean"
+    )
+
+    increasing_x = np.sort(gx)
+    increasing_y = np.sort(gy)
+
+    kriged_scaled, variance = ok.execute(
+        "grid",
+        increasing_x,
+        increasing_y,
+        n_closest_points=12,
+        backend="loop"
+    )
+
+    if np.ma.isMaskedArray(kriged_scaled):
+        kriged_scaled = np.ma.filled(kriged_scaled, np.nan)
+
+    if np.ma.isMaskedArray(variance):
+        variance = np.ma.filled(variance, np.nan)
+
+    kriged_scaled = np.asarray(kriged_scaled, dtype=float)
+    variance = np.asarray(variance, dtype=float)
+
+    kriged = kriged_scaled * z_std + z_mean
+
+    # La grilla de GeoTIFF tiene Y descendente y PyKrige devuelve Y creciente.
+    if len(grid_y) > 1 and grid_y[0] > grid_y[-1]:
+        kriged = np.flipud(kriged)
+        variance = np.flipud(variance)
 
     kriged[~np.isfinite(kriged)] = np.nan
     variance[~np.isfinite(variance)] = np.nan
-    residual_points[~valid] = np.nan
 
-    if valid_mask is not None:
-        if valid_mask.shape != expected_shape:
-            raise ValueError("La máscara de GWRC no coincide con la grilla de kriging.")
-        kriged = np.where(valid_mask, kriged, np.nan)
-        variance = np.where(valid_mask, variance, np.nan)
+    # Control explícito de inestabilidad numérica. No se reemplazan valores
+    # con vecinos ni se altera el modelo; simplemente se detiene el proceso
+    # si el kriging genera una magnitud físicamente/numericamente anómala.
+    z_abs_max = float(np.max(np.abs(z)))
+    allowed_max = max(10.0 * z_abs_max, 1.0)
+
+    if np.any(np.isfinite(kriged) & (np.abs(kriged) > allowed_max)):
+        raise ValueError(
+            "El Ordinary Kriging de residuos produjo valores numéricamente "
+            "inestables. Se detuvo la suma raster para evitar un GWRCK inválido. "
+            f"Máximo residuo observado: {z_abs_max:.6f}; "
+            f"límite de control: {allowed_max:.6f}."
+        )
+
+    expected_shape = (len(grid_y), len(grid_x))
 
     if kriged.shape != expected_shape:
         raise ValueError(
-            f"Forma de kriging inesperada: {kriged.shape}; se esperaba {expected_shape}."
+            "El raster de residuos krigeados no coincide con la grilla de 30 m. "
+            f"Forma esperada: {expected_shape}; forma obtenida: {kriged.shape}."
         )
 
-    return (
-        kriged.astype(np.float32),
-        variance.astype(np.float32),
-        residual_points.astype(np.float32)
-    )
-
-
-def krige_residuals_leave_one_out(coords, residuals):
-    """Predice cada residuo excluyéndolo de su propio kriging.
-
-    Estas predicciones se usan exclusivamente para R², RMSE y MAE. La
-    superficie raster final se mantiene calculada con todos los residuos,
-    pues ésa es la superficie que se entrega al usuario.
-    """
-    coords = np.asarray(coords, dtype=float)
-    residuals = np.asarray(residuals, dtype=float).reshape(-1)
-    n = len(residuals)
-    predictions = np.full(n, np.nan, dtype=np.float32)
-    base_valid = np.isfinite(coords).all(axis=1) & np.isfinite(residuals)
-
-    for held_out in np.where(base_valid)[0]:
-        train = base_valid.copy()
-        train[held_out] = False
-        x = coords[train, 0]
-        y = coords[train, 1]
-        z = residuals[train]
-
-        # Agrupar duplicados del conjunto de entrenamiento para PyKrige.
-        locations = np.column_stack((x, y))
-        unique_locations, inverse = np.unique(locations, axis=0, return_inverse=True)
-        if len(unique_locations) != len(locations):
-            z = np.bincount(inverse, weights=z) / np.bincount(inverse)
-            x = unique_locations[:, 0]
-            y = unique_locations[:, 1]
-
-        if len(z) < 3:
-            continue
-
-        z_mean = float(np.mean(z))
-        z_std = float(np.std(z))
-        if not np.isfinite(z_std) or z_std == 0:
-            predictions[held_out] = z_mean
-            continue
-
-        x0, y0, scale = float(np.mean(x)), float(np.mean(y)), 1000.0
-        ok = OrdinaryKriging(
-            (x - x0) / scale,
-            (y - y0) / scale,
-            (z - z_mean) / z_std,
-            variogram_model="gaussian",
-            nlags=min(15, max(6, len(z) - 1)),
-            verbose=False,
-            enable_plotting=False,
-            coordinates_type="euclidean"
-        )
-
-        pred_scaled, _ = ok.execute(
-            "points",
-            np.array([(coords[held_out, 0] - x0) / scale]),
-            np.array([(coords[held_out, 1] - y0) / scale]),
-            n_closest_points=min(12, len(z)),
-            backend="loop"
-        )
-        predictions[held_out] = float(
-            np.asarray(np.ma.filled(pred_scaled, np.nan))[0] * z_std + z_mean
-        )
-
-    return predictions
+    return kriged, variance
 
 def create_geotiff(
     array,
@@ -2061,24 +1939,16 @@ if run_model:
 
         (
             kriged_residual,
-            kriging_variance,
-            _
+            kriging_variance
         ) = krige_residuals(
             results["coords"],
             results["gwrc_residuals"],
             grid_x,
-            grid_y,
-            valid_mask=np.isfinite(raster_gwrc)
+            grid_y
         )
 
     # El resultado anterior es el raster espacial interpolado de los residuos:
     # Residual_GWRC_Kriged_30m.tif
-    # Se eliminan sólo picos aislados con el promedio de píxeles vecinos.
-    # Esta etapa es cartográfica y no se usa para las métricas LOO.
-    kriged_residual, n_despiked_pixels = despike_kriged_residual(
-        kriged_residual
-    )
-
     # Raster Calculator equivalente a:
     # SOC_GWRCK = SOC_GWRC + Residual_GWRC_Kriged_30m
     raster_gwrck = raster_calculator_add(
@@ -2096,33 +1966,72 @@ if run_model:
             "Verifica la alineacion entre SOC_GWRC y el raster de residuos krigeados."
         )
 
-    # Validación solicitada: los valores se extraen directamente de los tres
-    # rasters de 30 m, usando la misma celda que contiene cada punto.
+    # Extraer del TIFF krigeado el valor de residuo correspondiente a cada
+    # punto observado. Este es el paso solicitado para construir el GWRCK
+    # puntual:
+    #
+    # SOC_GWRCK(punto) = SOC_GWRC(punto) + Residual_GWRC_Kriged(punto)
+    #
+    # El SOC_GWRC del punto proviene directamente del GWRC original de los
+    # 94 puntos, mientras que el residuo proviene del raster generado por
+    # Ordinary Kriging.
     point_rows, point_cols = rasterio.transform.rowcol(
         transform,
         results["coords"][:, 0],
         results["coords"][:, 1]
     )
+
     point_rows = np.asarray(point_rows, dtype=int)
     point_cols = np.asarray(point_cols, dtype=int)
-    inside = (
-        (point_rows >= 0) & (point_rows < height)
-        & (point_cols >= 0) & (point_cols < width)
+
+    valid_location = (
+        (point_rows >= 0)
+        & (point_rows < kriged_residual.shape[0])
+        & (point_cols >= 0)
+        & (point_cols < kriged_residual.shape[1])
     )
 
-    raster_gwrc_points = np.full(len(results["coords"]), np.nan, dtype=float)
-    residual_kriged_points = np.full(len(results["coords"]), np.nan, dtype=float)
-    gwrck_raster_points = np.full(len(results["coords"]), np.nan, dtype=float)
-    raster_gwrc_points[inside] = raster_gwrc[point_rows[inside], point_cols[inside]]
-    residual_kriged_points[inside] = kriged_residual[point_rows[inside], point_cols[inside]]
-    gwrck_raster_points[inside] = raster_gwrck[point_rows[inside], point_cols[inside]]
+    residual_kriged_points = np.full(
+        len(results["coords"]),
+        np.nan,
+        dtype=float
+    )
+
+    residual_kriged_points[valid_location] = kriged_residual[
+        point_rows[valid_location],
+        point_cols[valid_location]
+    ]
+
+    # Los valores puntuales se extraen directamente de los rasters de 30 m.
+    # Esta es la misma operación que usaría ArcGIS Pro tras Raster Calculator:
+    # SOC_GWRCK_30m = SOC_GWRC_30m + Residual_GWRC_Kriged_30m.
+    gwrc_raster_points = np.full(
+        len(results["coords"]),
+        np.nan,
+        dtype=float
+    )
+
+    gwrck_extracted = np.full(
+        len(results["coords"]),
+        np.nan,
+        dtype=float
+    )
+
+    gwrc_raster_points[valid_location] = raster_gwrc[
+        point_rows[valid_location],
+        point_cols[valid_location]
+    ]
+
+    gwrck_extracted[valid_location] = raster_gwrck[
+        point_rows[valid_location],
+        point_cols[valid_location]
+    ]
 
     observed = data["SOC"].values.astype(float)
-    valid_metrics = np.isfinite(observed) & np.isfinite(gwrck_raster_points)
 
-    st.info(
-        f"Filtro de picos aislados: {n_despiked_pixels:,} píxeles de residuos "
-        "reemplazados por el promedio de sus vecinos."
+    valid_metrics = (
+        np.isfinite(observed)
+        & np.isfinite(gwrck_extracted)
     )
 
     n_gwrc_raster = int(
@@ -2171,19 +2080,19 @@ if run_model:
 
         gwrck_r2 = r2_score(
             observed[valid_metrics],
-            gwrck_raster_points[valid_metrics]
+            gwrck_extracted[valid_metrics]
         )
 
         gwrck_rmse = np.sqrt(
             mean_squared_error(
                 observed[valid_metrics],
-                gwrck_raster_points[valid_metrics]
+                gwrck_extracted[valid_metrics]
             )
         )
 
         gwrck_mae = mean_absolute_error(
             observed[valid_metrics],
-            gwrck_raster_points[valid_metrics]
+            gwrck_extracted[valid_metrics]
         )
 
     else:
@@ -2198,13 +2107,13 @@ if run_model:
         "SOC_Observed": observed,
         "SOC_GWRC_Point_Model": results["gwrc_pred"],
         "Residual_GWRC": results["gwrc_residuals"],
-        "SOC_GWRC_Raster_30m": raster_gwrc_points,
-        "Residual_Kriged_Raster_30m": residual_kriged_points,
-        "SOC_GWRCK_Raster_30m": gwrck_raster_points
+        "SOC_GWRC_Raster_30m": gwrc_raster_points,
+        "Residual_GWRC_Kriged_Raster_30m": residual_kriged_points,
+        "SOC_GWRCK_Raster_30m": gwrck_extracted
     })
 
     gwrck_metrics_row = pd.DataFrame({
-        "Model": ["GWRCK (Raster 30m)"],
+        "Model": ["GWRCK (Raster Calculator 30m)"],
         "N": [int(np.sum(valid_metrics))],
         "Variables": [len(VARS_MODEL)],
         "Bandwidth": [selected_bandwidth],
