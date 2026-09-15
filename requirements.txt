@@ -10,3 +10,6 @@ mgwr
 pykrige
 psutil
 pyshp
+folium
+streamlit-folium
+branca
