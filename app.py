@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import streamlit as st
 import rasterio
-from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.warp import calculate_default_transform, reproject, Resampling, transform as rio_transform
 
 import folium
 from folium.raster_layers import ImageOverlay
@@ -13,7 +13,7 @@ from streamlit_folium import st_folium
 
 
 st.set_page_config(
-    page_title="Visor SOCS | Valle del río Amojú",
+    page_title="SOC Viewer | Amojú River Valley",
     page_icon="🌎",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -229,6 +229,108 @@ def _common_scale(raster_a, raster_b):
     return vmin, vmax
 
 
+
+def _query_raster_value(path, lon, lat):
+    """Obtiene el valor del píxel original del GeoTIFF en una coordenada WGS84."""
+    with rasterio.open(path) as src:
+        if src.crs is None:
+            return None, None, None
+
+        # Convertimos la coordenada del clic desde WGS84 al CRS original del raster.
+        xs, ys = rio_transform(
+            "EPSG:4326",
+            src.crs,
+            [lon],
+            [lat]
+        )
+        x, y = xs[0], ys[0]
+
+        # Índice de la celda que contiene el punto.
+        row, col = src.index(x, y)
+
+        if row < 0 or row >= src.height or col < 0 or col >= src.width:
+            return None, None, None
+
+        value = src.read(1, window=((row, row + 1), (col, col + 1)))[0, 0]
+        nodata = src.nodata
+
+        if nodata is not None and np.isclose(value, nodata, equal_nan=True):
+            return None, row, col
+
+        if not np.isfinite(value):
+            return None, row, col
+
+        # Centro exacto del píxel consultado, en WGS84.
+        center_x, center_y = rasterio.transform.xy(
+            src.transform,
+            row,
+            col,
+            offset="center"
+        )
+        center_lon, center_lat = rio_transform(
+            src.crs,
+            "EPSG:4326",
+            [center_x],
+            [center_y]
+        )
+
+        return float(value), row, col
+
+
+def _show_pixel_query(click_data):
+    """Muestra los valores GWRC y GWRCK del píxel seleccionado."""
+    if not click_data or "lat" not in click_data or "lng" not in click_data:
+        return
+
+    lat = float(click_data["lat"])
+    lon = float(click_data["lng"])
+
+    gwrc_value, gwrc_row, gwrc_col = _query_raster_value(
+        GWRC_FILE,
+        lon,
+        lat
+    )
+    gwrck_value, gwrck_row, gwrck_col = _query_raster_value(
+        GWRCK_FILE,
+        lon,
+        lat
+    )
+
+    # Usamos el centro del píxel GWRC cuando está disponible.
+    pixel_lat = lat
+    pixel_lon = lon
+    if gwrc_value is not None:
+        with rasterio.open(GWRC_FILE) as src:
+            xs, ys = rio_transform("EPSG:4326", src.crs, [lon], [lat])
+            row, col = src.index(xs[0], ys[0])
+            cx, cy = rasterio.transform.xy(src.transform, row, col, offset="center")
+            plon, plat = rio_transform(src.crs, "EPSG:4326", [cx], [cy])
+            pixel_lon = float(plon[0])
+            pixel_lat = float(plat[0])
+
+    st.markdown("### SOC Value of the Selected Pixel")
+    st.caption(
+        f"Pixel center coordinates: {pixel_lat:.6f}°, {pixel_lon:.6f}°"
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.metric(
+            "GWRC",
+            f"{gwrc_value:.2f} Mg ha⁻¹" if gwrc_value is not None else "No data"
+        )
+    with c2:
+        st.metric(
+            "GWRCK",
+            f"{gwrck_value:.2f} Mg ha⁻¹" if gwrck_value is not None else "No data"
+        )
+
+    if gwrc_row is not None and gwrc_col is not None:
+        st.caption(
+            f"GWRC raster cell: row {gwrc_row + 1}, column {gwrc_col + 1}"
+        )
+
+
 def create_soc_map(gwrc_path, gwrck_path):
     """Construye el visor final con únicamente GWRC y GWRCK."""
 
@@ -285,7 +387,7 @@ def create_soc_map(gwrc_path, gwrck_path):
             "World_Imagery/MapServer/tile/{z}/{y}/{x}"
         ),
         attr="Esri World Imagery",
-        name="Imagen satelital",
+        name="Satellite imagery",
         overlay=False,
         control=True
     ).add_to(m)
@@ -339,7 +441,7 @@ def create_soc_map(gwrc_path, gwrck_path):
         ],
         vmin=vmin,
         vmax=vmax,
-        caption="SOCS (Mg ha⁻¹)"
+        caption="SOC (Mg ha⁻¹)"
     )
 
     colormap.add_to(m)
@@ -375,22 +477,24 @@ def create_soc_map(gwrc_path, gwrck_path):
 # -----------------------------------------------------------------------------
 
 st.markdown(
-    '<h1 class="main-title">Mapa Digital de Carbono Orgánico del Suelo</h1>',
+    '<h1 class="main-title">Soil Organic Carbon Content and Spatial Distribution in the Amojú River Valley</h1>',
     unsafe_allow_html=True
 )
 
 st.markdown(
-    '<div class="main-subtitle">Valle del río Amojú, Jaén, Perú</div>',
+    '<div class="main-subtitle">Amojú River Valley, Jaén, Peru</div>',
     unsafe_allow_html=True
 )
 
 st.markdown(
     """
     <div class="viewer-note">
-        <b>Visor de SOCS</b><br>
-        Visualización espacial de las estimaciones de carbono orgánico del suelo
-        mediante los modelos GWRC y GWRCK. Los datos y resultados del modelo
-        fueron previamente procesados y cargados por el desarrollador.
+        <b>Soil Organic Carbon Viewer</b><br>
+        Rice cultivation is an important agricultural resource in the Amojú River Valley in northwestern Peru.
+        This spatial map of soil organic carbon content and distribution provides a tool for identifying
+        spatial patterns of soil carbon across agricultural areas and can support the development of soil
+        conservation and sustainable land management strategies for rice production. The GWRC and GWRCK
+        model results were previously processed and are provided directly through this viewer.
     </div>
     """,
     unsafe_allow_html=True
@@ -411,45 +515,53 @@ if not GWRCK_FILE.exists():
 
 if missing_files:
     st.error(
-        "No se encontraron los archivos de resultados necesarios para el visor: "
+        "The following result files required by the viewer were not found: "
         + ", ".join(missing_files)
     )
 
     st.info(
-        "Coloca los GeoTIFF finales dentro de la carpeta 'data' del proyecto "
-        "antes de desplegar la aplicación. El usuario final no tendrá que cargar "
-        "ningún archivo."
+        "Place the final GeoTIFF files inside the project's 'data' folder before deploying the application. "
+        "End users do not need to upload any files."
     )
 
     st.stop()
 
 
-st.subheader("Visualización espacial")
+st.subheader("Spatial visualization")
 
 st.write(
-    "Utiliza el control de capas ubicado en la esquina superior derecha "
-    "del mapa para activar o desactivar GWRC y GWRCK."
+    "Use the layer control in the upper-right corner of the map to turn GWRC and GWRCK on or off. "
+    "Click anywhere within the study area to retrieve the SOC value of the corresponding 30 × 30 m pixel."
 )
 
 
-with st.spinner("Cargando mapa de SOCS..."):
+with st.spinner("Loading SOC map..."):
     soc_map = create_soc_map(
         GWRC_FILE,
         GWRCK_FILE
     )
 
-st_folium(
+map_data = st_folium(
     soc_map,
     width=None,
     height=MAP_HEIGHT,
-    returned_objects=[]
+    returned_objects=["last_clicked"]
 )
+
+click_data = map_data.get("last_clicked") if map_data else None
+
+if click_data:
+    _show_pixel_query(click_data)
+else:
+    st.info(
+        "Click on the map to retrieve the SOC value of the selected pixel for GWRC and GWRCK."
+    )
 
 
 st.markdown(
     """
     <div class="footer-note">
-        SOCS expresado en Mg ha⁻¹ · Modelos espaciales GWRC y GWRCK
+        SOC expressed in Mg ha⁻¹ · Spatial models: GWRC and GWRCK
     </div>
     """,
     unsafe_allow_html=True
