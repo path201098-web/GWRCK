@@ -11,6 +11,12 @@ import pandas as pd
 import streamlit as st
 import rasterio
 from rasterio.io import MemoryFile
+from rasterio.warp import calculate_default_transform
+
+import folium
+from folium.raster_layers import ImageOverlay
+from branca.colormap import LinearColormap
+from streamlit_folium import st_folium
 
 from rasterio.transform import from_origin
 from rasterio.warp import reproject, Resampling
@@ -1378,6 +1384,184 @@ def clip_output_rasters(output_paths, clip_zip):
     return clipped_paths
 
 
+
+def _continuous_rgba(values, vmin, vmax):
+    """Convierte un raster continuo en RGBA sin modificar el GeoTIFF original."""
+    arr = np.asarray(values, dtype=float)
+    finite = np.isfinite(arr)
+    rgba = np.zeros(arr.shape + (4,), dtype=np.uint8)
+
+    if not np.any(finite):
+        return rgba
+
+    if vmax <= vmin:
+        vmax = vmin + 1.0
+
+    t = np.clip((arr - vmin) / (vmax - vmin), 0.0, 1.0)
+
+    # Paleta tipo viridis, adecuada para variables continuas.
+    stops = np.array([0.0, 0.25, 0.50, 0.75, 1.0])
+    colors = np.array([
+        [68, 1, 84],
+        [59, 82, 139],
+        [33, 145, 140],
+        [94, 201, 98],
+        [253, 231, 37]
+    ], dtype=float)
+
+    for channel in range(3):
+        rgba[..., channel] = np.interp(
+            t,
+            stops,
+            colors[:, channel]
+        ).astype(np.uint8)
+
+    rgba[..., 3] = np.where(finite, 205, 0).astype(np.uint8)
+    return rgba
+
+
+def _read_raster_for_webmap(path):
+    """Lee un GeoTIFF y lo reproyecta solo para visualización web."""
+    with rasterio.open(path) as src:
+        data = src.read(1).astype(float)
+        src_transform = src.transform
+        src_crs = src.crs
+        src_nodata = src.nodata
+
+        if src_nodata is not None:
+            data[data == src_nodata] = np.nan
+
+        finite = np.isfinite(data)
+        if not np.any(finite):
+            raise ValueError(
+                f"El raster {os.path.basename(path)} no contiene valores válidos para visualizar."
+            )
+
+        # Limita el tamaño de la capa web sin modificar el archivo descargable.
+        max_dim = 1400
+        scale = max(data.shape) / max_dim
+        if scale > 1:
+            dst_width = max(1, int(data.shape[1] / scale))
+            dst_height = max(1, int(data.shape[0] / scale))
+        else:
+            dst_width = data.shape[1]
+            dst_height = data.shape[0]
+
+        dst_transform, dst_width, dst_height = calculate_default_transform(
+            src_crs,
+            "EPSG:4326",
+            src.width,
+            src.height,
+            *src.bounds,
+            dst_width=dst_width,
+            dst_height=dst_height
+        )
+
+        destination = np.full(
+            (dst_height, dst_width),
+            np.nan,
+            dtype=np.float32
+        )
+
+        reproject(
+            source=data.astype(np.float32),
+            destination=destination,
+            src_transform=src_transform,
+            src_crs=src_crs,
+            dst_transform=dst_transform,
+            dst_crs="EPSG:4326",
+            src_nodata=np.nan,
+            dst_nodata=np.nan,
+            resampling=Resampling.bilinear
+        )
+
+    finite_dst = np.isfinite(destination)
+    values = destination[finite_dst]
+    vmin = float(np.nanpercentile(values, 2))
+    vmax = float(np.nanpercentile(values, 98))
+
+    rgba = _continuous_rgba(
+        destination,
+        vmin,
+        vmax
+    )
+
+    left = dst_transform.c
+    top = dst_transform.f
+    right = left + dst_transform.a * dst_width
+    bottom = top + dst_transform.e * dst_height
+
+    bounds = [
+        [bottom, left],
+        [top, right]
+    ]
+
+    return rgba, bounds, vmin, vmax
+
+
+def display_geotiff_map(path, title):
+    """Visualización interactiva independiente del procesamiento del modelo."""
+    rgba, bounds, vmin, vmax = _read_raster_for_webmap(path)
+
+    center_lat = (bounds[0][0] + bounds[1][0]) / 2.0
+    center_lon = (bounds[0][1] + bounds[1][1]) / 2.0
+
+    m = folium.Map(
+        location=[center_lat, center_lon],
+        zoom_start=13,
+        control_scale=True,
+        tiles=None
+    )
+
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri World Imagery",
+        name="Imagen satelital",
+        overlay=False,
+        control=True
+    ).add_to(m)
+
+    folium.TileLayer(
+        tiles="OpenStreetMap",
+        name="OpenStreetMap",
+        overlay=False,
+        control=True
+    ).add_to(m)
+
+    ImageOverlay(
+        image=rgba,
+        bounds=bounds,
+        opacity=0.78,
+        interactive=False,
+        cross_origin=False,
+        zindex=2,
+        name=title
+    ).add_to(m)
+
+    colormap = LinearColormap(
+        colors=[
+            "#440154",
+            "#3b528b",
+            "#21918c",
+            "#5ec962",
+            "#fde725"
+        ],
+        vmin=vmin,
+        vmax=vmax,
+        caption=title
+    )
+    colormap.add_to(m)
+
+    folium.LayerControl(collapsed=False).add_to(m)
+
+    st_folium(
+        m,
+        width=None,
+        height=650,
+        returned_objects=[]
+    )
+
+
 def create_geotiff(
     array,
     transform,
@@ -2314,6 +2498,38 @@ if run_model:
         output_files,
         zip_path
     )
+
+    st.subheader(
+        "Visualización espacial"
+    )
+
+    st.write(
+        "Explora los GeoTIFF directamente sobre una base satelital. "
+        "Esta visualización es independiente de los cálculos del modelo y no modifica los archivos."
+    )
+
+    visualization_options = {
+        "SOC GWR": output_paths["gwr"],
+        "SOC GWRC": output_paths["gwrc"],
+        "Residuo GWRC krigeado": output_paths["residual"],
+        "Varianza del kriging": output_paths["variance"],
+        "SOC GWRCK": output_paths["gwrck"],
+        "CN local": output_paths["cn"],
+        "Lambda local": output_paths["lambda"]
+    }
+
+    selected_map = st.selectbox(
+        "Selecciona el raster que deseas visualizar",
+        list(visualization_options.keys()),
+        index=4,
+        key="map_raster_selector"
+    )
+
+    with st.spinner("Preparando visualización espacial..."):
+        display_geotiff_map(
+            visualization_options[selected_map],
+            selected_map
+        )
 
     st.subheader(
         "Descargar resultados"
