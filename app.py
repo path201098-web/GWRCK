@@ -71,12 +71,17 @@ st.markdown(
         }
 
         .context-card {
-            background: #f6f8fa;
-            border: 1px solid #e2e8f0;
+            background: var(--secondary-background-color);
+            color: var(--text-color);
+            border: 1px solid rgba(128, 128, 128, 0.22);
             border-radius: 12px;
             padding: 1.05rem 1.15rem;
             margin: 0.5rem 0 1rem 0;
             line-height: 1.58;
+        }
+
+        .context-card b {
+            color: var(--text-color);
         }
 
         .section-card {
