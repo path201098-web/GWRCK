@@ -26,7 +26,7 @@ st.set_page_config(
 
 
 # -----------------------------------------------------------------------------
-# CONFIGURATION
+# CONFIGURACIÓN
 # -----------------------------------------------------------------------------
 
 APP_DIR = Path(__file__).resolve().parent
@@ -40,12 +40,13 @@ MAP_HEIGHT = 700
 
 
 # -----------------------------------------------------------------------------
-# INTERFACE STYLE
+# ESTILO
 # -----------------------------------------------------------------------------
 
 st.markdown(
     """
     <style>
+
         .block-container {
             max-width: 1500px;
             padding-top: 1.5rem;
@@ -78,7 +79,7 @@ st.markdown(
             margin-bottom: 1.25rem;
         }
 
-        /* CONTEXT */
+        /* CONTEXTO */
         .context-card {
             background: var(--secondary-background-color);
             color: var(--text-color);
@@ -93,7 +94,7 @@ st.markdown(
             color: var(--text-color);
         }
 
-        /* SECTIONS */
+        /* SECCIONES */
         .section-card {
             color: var(--text-color);
             border-left: 4px solid rgba(128, 128, 128, 0.65);
@@ -105,7 +106,7 @@ st.markdown(
             color: var(--text-color);
         }
 
-        /* QUERY */
+        /* CONSULTA */
         .query-card {
             background: var(--secondary-background-color);
             color: var(--text-color);
@@ -128,7 +129,7 @@ st.markdown(
             margin-bottom: 0.35rem;
         }
 
-        /* MAP */
+        /* MAPA */
         .map-label {
             color: var(--text-color);
             font-weight: 650;
@@ -145,10 +146,13 @@ st.markdown(
         }
 
         @media (max-width: 900px) {
+
             .hero-title {
                 font-size: 1.65rem;
             }
+
         }
+
     </style>
     """,
     unsafe_allow_html=True
@@ -156,15 +160,19 @@ st.markdown(
 
 
 # -----------------------------------------------------------------------------
-# RASTER FUNCTIONS
+# FUNCIONES DE RASTER
 # -----------------------------------------------------------------------------
 
 def _continuous_rgba(values, vmin, vmax):
 
     arr = np.asarray(values, dtype=float)
+
     finite = np.isfinite(arr)
 
-    rgba = np.zeros(arr.shape + (4,), dtype=np.uint8)
+    rgba = np.zeros(
+        arr.shape + (4,),
+        dtype=np.uint8
+    )
 
     if not np.any(finite):
         return rgba
@@ -178,13 +186,15 @@ def _continuous_rgba(values, vmin, vmax):
         1.0
     )
 
-    stops = np.array([
-        0.0,
-        0.25,
-        0.50,
-        0.75,
-        1.0
-    ])
+    stops = np.array(
+        [
+            0.0,
+            0.25,
+            0.50,
+            0.75,
+            1.0
+        ]
+    )
 
     colors = np.array(
         [
@@ -426,7 +436,7 @@ def _query_raster_value(path, lon, lat):
 
 
 # -----------------------------------------------------------------------------
-# MAP
+# MAPA
 # -----------------------------------------------------------------------------
 
 def create_soc_map(
@@ -558,18 +568,26 @@ def create_soc_map(
 
     halo_css = """
     <style>
+
         .legend text,
         .legend label,
         .legend div {
+
             paint-order: stroke fill;
+
             stroke: white;
+
             stroke-width: 3px;
+
             stroke-linejoin: round;
+
             text-shadow:
                 0 0 3px white,
                 0 0 3px white;
+
             font-weight: 600;
         }
+
     </style>
     """
 
@@ -585,17 +603,19 @@ def create_soc_map(
 
 
 # -----------------------------------------------------------------------------
-# CHECK FILES
+# COMPROBAR ARCHIVOS
 # -----------------------------------------------------------------------------
 
 missing_files = []
 
 if not GWRC_FILE.exists():
+
     missing_files.append(
         GWRC_FILE.name
     )
 
 if not GWRCK_FILE.exists():
+
     missing_files.append(
         GWRCK_FILE.name
     )
@@ -617,7 +637,7 @@ if missing_files:
 
 
 # -----------------------------------------------------------------------------
-# MAIN INTERFACE
+# INTERFAZ PRINCIPAL
 # -----------------------------------------------------------------------------
 
 left_col, right_col = st.columns(
@@ -627,7 +647,7 @@ left_col, right_col = st.columns(
 
 
 # -----------------------------------------------------------------------------
-# LEFT PANEL
+# COLUMNA IZQUIERDA
 # -----------------------------------------------------------------------------
 
 with left_col:
@@ -637,8 +657,7 @@ with left_col:
         <div class="hero-card">
 
             <div class="hero-title">
-                Soil Organic Carbon Content and Spatial Distribution
-                in the Amoju River Valley
+                Soil Organic Carbon Content and Spatial Distribution in the Amoju River Valley
             </div>
 
             <div class="hero-location">
@@ -654,22 +673,19 @@ with left_col:
         """
         <div class="context-card">
 
-        The Amoju River Valley in northwestern Peru is an important
-        agricultural area where rice cultivation represents a key
-        productive resource. Soil organic carbon is an important
-        component of soil functioning because its spatial distribution
-        is related to soil quality, nutrient dynamics, and the capacity
-        of agricultural soils to retain and cycle carbon.
+        The Amoju River Valley in northwestern Peru is an important agricultural area where
+        rice cultivation represents a key productive resource. Soil organic carbon is an
+        important component of soil functioning because its spatial distribution is related
+        to soil quality, nutrient dynamics, and the capacity of agricultural soils to retain
+        and cycle carbon.
 
         <br><br>
 
-        This interactive map presents the spatial distribution of soil
-        organic carbon estimated using the <b>GWRC</b> and <b>GWRCK</b>
-        models. The resulting spatial information can help identify
-        patterns and areas with contrasting soil carbon content across
-        the agricultural landscape and support the planning of soil
-        conservation and sustainable soil management strategies for
-        rice production in the Amoju River Valley.
+        This interactive map presents the spatial distribution of soil organic carbon estimated
+        using the <b>GWRC</b> and <b>GWRCK</b> models. The resulting spatial information can help
+        identify patterns and areas with contrasting soil carbon content across the agricultural
+        landscape and support the planning of soil conservation and sustainable soil management
+        strategies for rice production in the Amoju River Valley.
 
         </div>
         """,
@@ -685,8 +701,7 @@ with left_col:
 
     st.markdown(
         """
-        1. Use the **Layer control** on the map to switch between
-           GWRC and GWRCK.
+        1. Use the **Layer control** on the map to switch between GWRC and GWRCK.
         2. Zoom to the area of interest.
         3. **Click on any pixel** to retrieve its SOC value.
         4. The value is read from the original 30 × 30 m GeoTIFF.
@@ -702,16 +717,14 @@ with left_col:
 
     st.markdown(
         """
-        **GWRC** — Geographically Weighted Regression with local
-        ridge correction.
-
+        **GWRC** — Geographically Weighted Regression with local ridge correction.  
         **GWRCK** — GWRC combined with kriged GWRC residuals.
         """
     )
 
 
 # -----------------------------------------------------------------------------
-# RIGHT PANEL
+# COLUMNA DERECHA
 # -----------------------------------------------------------------------------
 
 with right_col:
@@ -728,7 +741,9 @@ with right_col:
         "30 × 30 m pixel. The two model layers use a common scale for comparison."
     )
 
-    with st.spinner("Loading SOC map..."):
+    with st.spinner(
+        "Loading SOC map..."
+    ):
 
         soc_map = create_soc_map(
             GWRC_FILE,
@@ -891,7 +906,7 @@ with right_col:
 
 
 # -----------------------------------------------------------------------------
-# ADDITIONAL INFORMATION
+# INFORMACIÓN ADICIONAL
 # -----------------------------------------------------------------------------
 
 st.divider()
