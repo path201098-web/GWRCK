@@ -4,7 +4,12 @@ from pathlib import Path
 import numpy as np
 import streamlit as st
 import rasterio
-from rasterio.warp import calculate_default_transform, reproject, Resampling, transform as rio_transform
+from rasterio.warp import (
+    calculate_default_transform,
+    reproject,
+    Resampling,
+    transform as rio_transform
+)
 
 import folium
 from folium.raster_layers import ImageOverlay
@@ -41,6 +46,7 @@ MAP_HEIGHT = 700
 st.markdown(
     """
     <style>
+
         .block-container {
             max-width: 1500px;
             padding-top: 1.5rem;
@@ -109,9 +115,30 @@ st.markdown(
             margin-bottom: 0.35rem;
         }
 
+        /* ------------------------------------------------------------------
+           TÍTULO ENCIMA DEL MAPA
+           ------------------------------------------------------------------ */
+
         .map-label {
-            font-weight: 650;
-            margin-bottom: 0.35rem;
+            display: block !important;
+            width: 100% !important;
+
+            height: 60px !important;
+
+            padding-top: 12px !important;
+            padding-bottom: 12px !important;
+
+            margin-top: 15px !important;
+            margin-bottom: 18px !important;
+
+            font-size: 1.45rem !important;
+            line-height: 32px !important;
+            font-weight: 700 !important;
+
+            color: var(--text-color) !important;
+
+            visibility: visible !important;
+            opacity: 1 !important;
         }
 
         .footer-note {
@@ -122,10 +149,19 @@ st.markdown(
         }
 
         @media (max-width: 900px) {
+
             .hero-title {
                 font-size: 1.65rem;
             }
+
+            .map-label {
+                font-size: 1.25rem !important;
+                height: 50px !important;
+                line-height: 28px !important;
+            }
+
         }
+
     </style>
     """,
     unsafe_allow_html=True
@@ -136,9 +172,9 @@ st.markdown(
 # FUNCIONES DE VISUALIZACIÓN
 # -----------------------------------------------------------------------------
 
-
 def _continuous_rgba(values, vmin, vmax):
     """Convierte un raster continuo en RGBA únicamente para visualización web."""
+
     arr = np.asarray(values, dtype=float)
     finite = np.isfinite(arr)
 
@@ -158,6 +194,7 @@ def _continuous_rgba(values, vmin, vmax):
 
     # Paleta continua tipo viridis.
     stops = np.array([0.0, 0.25, 0.50, 0.75, 1.0])
+
     colors = np.array(
         [
             [68, 1, 84],
@@ -189,6 +226,7 @@ def _read_raster_for_webmap(path):
     """Lee un GeoTIFF y lo reproyecta únicamente para su visualización web."""
 
     with rasterio.open(path) as src:
+
         data = src.read(1).astype(float)
         src_transform = src.transform
         src_crs = src.crs
@@ -207,15 +245,19 @@ def _read_raster_for_webmap(path):
         scale = max(data.shape) / MAX_WEB_DIM
 
         if scale > 1:
+
             dst_width = max(
                 1,
                 int(data.shape[1] / scale)
             )
+
             dst_height = max(
                 1,
                 int(data.shape[0] / scale)
             )
+
         else:
+
             dst_width = data.shape[1]
             dst_height = data.shape[0]
 
@@ -254,10 +296,9 @@ def _read_raster_for_webmap(path):
             f"El raster {path.name} no contiene valores válidos después de la reproyección."
         )
 
-    values = destination[finite_dst]
-
     left = dst_transform.c
     top = dst_transform.f
+
     right = left + dst_transform.a * dst_width
     bottom = top + dst_transform.e * dst_height
 
@@ -288,44 +329,61 @@ def _common_scale(raster_a, raster_b):
     return vmin, vmax
 
 
-
 def _query_raster_value(path, lon, lat):
     """Obtiene el valor del píxel original del GeoTIFF en una coordenada WGS84."""
+
     with rasterio.open(path) as src:
+
         if src.crs is None:
             return None, None, None
 
-        # Convertimos la coordenada del clic desde WGS84 al CRS original del raster.
+        # Convertimos la coordenada del clic desde WGS84
+        # al CRS original del raster.
         xs, ys = rio_transform(
             "EPSG:4326",
             src.crs,
             [lon],
             [lat]
         )
+
         x, y = xs[0], ys[0]
 
         # Índice de la celda que contiene el punto.
         row, col = src.index(x, y)
 
-        if row < 0 or row >= src.height or col < 0 or col >= src.width:
+        if (
+            row < 0
+            or row >= src.height
+            or col < 0
+            or col >= src.width
+        ):
             return None, None, None
 
-        value = src.read(1, window=((row, row + 1), (col, col + 1)))[0, 0]
+        value = src.read(
+            1,
+            window=((row, row + 1), (col, col + 1))
+        )[0, 0]
+
         nodata = src.nodata
 
-        if nodata is not None and np.isclose(value, nodata, equal_nan=True):
+        if nodata is not None and np.isclose(
+            value,
+            nodata,
+            equal_nan=True
+        ):
             return None, row, col
 
         if not np.isfinite(value):
             return None, row, col
 
-        # Centro exacto del píxel consultado, en WGS84.
+        # Centro exacto del píxel consultado.
         center_x, center_y = rasterio.transform.xy(
             src.transform,
             row,
             col,
             offset="center"
         )
+
         center_lon, center_lat = rio_transform(
             src.crs,
             "EPSG:4326",
@@ -338,7 +396,12 @@ def _query_raster_value(path, lon, lat):
 
 def _show_pixel_query(click_data):
     """Muestra los valores GWRC y GWRCK del píxel seleccionado."""
-    if not click_data or "lat" not in click_data or "lng" not in click_data:
+
+    if (
+        not click_data
+        or "lat" not in click_data
+        or "lng" not in click_data
+    ):
         return
 
     lat = float(click_data["lat"])
@@ -349,44 +412,91 @@ def _show_pixel_query(click_data):
         lon,
         lat
     )
+
     gwrck_value, gwrck_row, gwrck_col = _query_raster_value(
         GWRCK_FILE,
         lon,
         lat
     )
 
-    # Usamos el centro del píxel GWRC cuando está disponible.
     pixel_lat = lat
     pixel_lon = lon
+
     if gwrc_value is not None:
+
         with rasterio.open(GWRC_FILE) as src:
-            xs, ys = rio_transform("EPSG:4326", src.crs, [lon], [lat])
-            row, col = src.index(xs[0], ys[0])
-            cx, cy = rasterio.transform.xy(src.transform, row, col, offset="center")
-            plon, plat = rio_transform(src.crs, "EPSG:4326", [cx], [cy])
+
+            xs, ys = rio_transform(
+                "EPSG:4326",
+                src.crs,
+                [lon],
+                [lat]
+            )
+
+            row, col = src.index(
+                xs[0],
+                ys[0]
+            )
+
+            cx, cy = rasterio.transform.xy(
+                src.transform,
+                row,
+                col,
+                offset="center"
+            )
+
+            plon, plat = rio_transform(
+                src.crs,
+                "EPSG:4326",
+                [cx],
+                [cy]
+            )
+
             pixel_lon = float(plon[0])
             pixel_lat = float(plat[0])
 
-    st.markdown("### SOC Value of the Selected Pixel")
+    st.markdown(
+        "### SOC Value of the Selected Pixel"
+    )
+
     st.caption(
-        f"Pixel center coordinates: {pixel_lat:.6f}°, {pixel_lon:.6f}°"
+        f"Pixel center coordinates: "
+        f"{pixel_lat:.6f}°, {pixel_lon:.6f}°"
     )
 
     c1, c2 = st.columns(2)
+
     with c1:
+
         st.metric(
             "GWRC",
-            f"{gwrc_value:.2f} Mg ha⁻¹" if gwrc_value is not None else "No data"
-        )
-    with c2:
-        st.metric(
-            "GWRCK",
-            f"{gwrck_value:.2f} Mg ha⁻¹" if gwrck_value is not None else "No data"
+            (
+                f"{gwrc_value:.2f} Mg ha⁻¹"
+                if gwrc_value is not None
+                else "No data"
+            )
         )
 
-    if gwrc_row is not None and gwrc_col is not None:
+    with c2:
+
+        st.metric(
+            "GWRCK",
+            (
+                f"{gwrck_value:.2f} Mg ha⁻¹"
+                if gwrck_value is not None
+                else "No data"
+            )
+        )
+
+    if (
+        gwrc_row is not None
+        and gwrc_col is not None
+    ):
+
         st.caption(
-            f"GWRC raster cell: row {gwrc_row + 1}, column {gwrc_col + 1}"
+            f"GWRC raster cell: "
+            f"row {gwrc_row + 1}, "
+            f"column {gwrc_col + 1}"
         )
 
 
@@ -401,13 +511,13 @@ def create_soc_map(gwrc_path, gwrck_path):
         gwrck_path
     )
 
-    # Se utiliza una escala común para que ambas capas sean comparables.
+    # Escala común para comparar ambos modelos.
     vmin, vmax = _common_scale(
         gwrc_data,
         gwrck_data
     )
 
-    # El área de visualización se obtiene de la extensión combinada.
+    # Área de visualización.
     all_bounds = [
         gwrc_bounds,
         gwrck_bounds
@@ -417,14 +527,17 @@ def create_soc_map(gwrc_path, gwrck_path):
         bounds[0][0]
         for bounds in all_bounds
     )
+
     west = min(
         bounds[0][1]
         for bounds in all_bounds
     )
+
     north = max(
         bounds[1][0]
         for bounds in all_bounds
     )
+
     east = max(
         bounds[1][1]
         for bounds in all_bounds
@@ -434,7 +547,10 @@ def create_soc_map(gwrc_path, gwrck_path):
     center_lon = (west + east) / 2.0
 
     m = folium.Map(
-        location=[center_lat, center_lon],
+        location=[
+            center_lat,
+            center_lon
+        ],
         zoom_start=12,
         control_scale=True,
         tiles=None
@@ -442,7 +558,8 @@ def create_soc_map(gwrc_path, gwrck_path):
 
     folium.TileLayer(
         tiles=(
-            "https://server.arcgisonline.com/ArcGIS/rest/services/"
+            "https://server.arcgisonline.com/"
+            "ArcGIS/rest/services/"
             "World_Imagery/MapServer/tile/{z}/{y}/{x}"
         ),
         attr="Esri World Imagery",
@@ -507,6 +624,7 @@ def create_soc_map(gwrc_path, gwrck_path):
 
     halo_css = """
     <style>
+
         .legend text,
         .legend label,
         .legend div {
@@ -514,9 +632,12 @@ def create_soc_map(gwrc_path, gwrck_path):
             stroke: white;
             stroke-width: 3px;
             stroke-linejoin: round;
-            text-shadow: 0 0 3px white, 0 0 3px white;
+            text-shadow:
+                0 0 3px white,
+                0 0 3px white;
             font-weight: 600;
         }
+
     </style>
     """
 
@@ -532,37 +653,53 @@ def create_soc_map(gwrc_path, gwrck_path):
 
 
 # -----------------------------------------------------------------------------
-# INTERFAZ FINAL DEL VISOR
-# -----------------------------------------------------------------------------
-
-# -----------------------------------------------------------------------------
 # COMPROBACIÓN DE LOS RESULTADOS PRECALCULADOS
 # -----------------------------------------------------------------------------
 
 missing_files = []
 
 if not GWRC_FILE.exists():
-    missing_files.append(GWRC_FILE.name)
+    missing_files.append(
+        GWRC_FILE.name
+    )
 
 if not GWRCK_FILE.exists():
-    missing_files.append(GWRCK_FILE.name)
+    missing_files.append(
+        GWRCK_FILE.name
+    )
 
 if missing_files:
+
     st.error(
         "The following result files required by the viewer were not found: "
         + ", ".join(missing_files)
     )
+
     st.info(
-        "Place the final GeoTIFF files inside the project's 'data' folder before deploying the application. "
-        "End users do not need to upload any files."
+        "Place the final GeoTIFF files inside the project's 'data' folder "
+        "before deploying the application. End users do not need to upload "
+        "any files."
     )
+
     st.stop()
 
-# Single-screen landing layout: information on the left and the interactive
-# spatial viewer on the right.
-left_col, right_col = st.columns([0.38, 0.62], gap="large")
+
+# -----------------------------------------------------------------------------
+# INTERFAZ FINAL DEL VISOR
+# -----------------------------------------------------------------------------
+
+left_col, right_col = st.columns(
+    [0.38, 0.62],
+    gap="large"
+)
+
+
+# -----------------------------------------------------------------------------
+# COLUMNA IZQUIERDA
+# -----------------------------------------------------------------------------
 
 with left_col:
+
     st.markdown(
         "## Soil Organic Carbon Content and Spatial Distribution "
         "in the Amoju River Valley"
@@ -575,23 +712,38 @@ with left_col:
     st.markdown(
         """
         <div class="context-card">
-        The Amoju River Valley in northwestern Peru is an important agricultural area where
-        rice cultivation represents a key productive resource. Soil organic carbon is an
-        important component of soil functioning because its spatial distribution is related
-        to soil quality, nutrient dynamics, and the capacity of agricultural soils to retain
-        and cycle carbon.
+
+        The Amoju River Valley in northwestern Peru is an important
+        agricultural area where rice cultivation represents a key
+        productive resource. Soil organic carbon is an important
+        component of soil functioning because its spatial distribution
+        is related to soil quality, nutrient dynamics, and the capacity
+        of agricultural soils to retain and cycle carbon.
+
         <br><br>
-        This interactive map presents the spatial distribution of soil organic carbon estimated
-        using the <b>GWRC</b> and <b>GWRCK</b> models. The resulting spatial information can help
-        identify patterns and areas with contrasting soil carbon content across the agricultural
-        landscape and support the planning of soil conservation and sustainable soil management
-        strategies for rice production in the Amoju River Valley.
+
+        This interactive map presents the spatial distribution of soil
+        organic carbon estimated using the <b>GWRC</b> and
+        <b>GWRCK</b> models. The resulting spatial information can help
+        identify patterns and areas with contrasting soil carbon content
+        across the agricultural landscape and support the planning of
+        soil conservation and sustainable soil management strategies
+        for rice production in the Amoju River Valley.
+
         </div>
         """,
         unsafe_allow_html=True
     )
 
-    st.markdown('<div class="section-card"><b>How to use the viewer</b></div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+        <div class="section-card">
+        <b>How to use the viewer</b>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
     st.markdown(
         """
         1. Use the **Layer control** on the map to switch between GWRC and GWRCK.
@@ -601,22 +753,54 @@ with left_col:
         """
     )
 
-    st.markdown('<div class="section-card"><b>Spatial models</b></div>', unsafe_allow_html=True)
     st.markdown(
         """
-        **GWRC** — Geographically Weighted Regression with local ridge correction.  
+        <div class="section-card">
+        <b>Spatial models</b>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        """
+        **GWRC** — Geographically Weighted Regression with local ridge correction.
+
         **GWRCK** — GWRC combined with kriged GWRC residuals.
         """
     )
 
+
+# -----------------------------------------------------------------------------
+# COLUMNA DERECHA: MAPA
+# -----------------------------------------------------------------------------
+
 with right_col:
-    st.markdown('<div class="map-label">Interactive SOC spatial distribution</div>', unsafe_allow_html=True)
-    st.caption(
-        "Click on the map to retrieve the SOC content of the corresponding 30 × 30 m pixel. "
-        "The two model layers use a common scale for comparison."
+
+    # -------------------------------------------------------------------------
+    # TÍTULO DEL MAPA
+    # -------------------------------------------------------------------------
+
+    st.markdown(
+        """
+        <div class="map-label">
+            Interactive SOC spatial distribution
+        </div>
+        """,
+        unsafe_allow_html=True
     )
 
+    st.caption(
+        "Click on the map to retrieve the SOC content of the corresponding "
+        "30 × 30 m pixel. The two model layers use a common scale for comparison."
+    )
+
+    # -------------------------------------------------------------------------
+    # MAPA
+    # -------------------------------------------------------------------------
+
     with st.spinner("Loading SOC map..."):
+
         soc_map = create_soc_map(
             GWRC_FILE,
             GWRCK_FILE
@@ -626,23 +810,44 @@ with right_col:
         soc_map,
         width=None,
         height=MAP_HEIGHT,
-        returned_objects=["last_clicked"]
+        returned_objects=[
+            "last_clicked"
+        ]
     )
 
-    click_data = map_data.get("last_clicked") if map_data else None
+    click_data = (
+        map_data.get("last_clicked")
+        if map_data
+        else None
+    )
 
-    # Pixel information is intentionally displayed below the map on the right.
-    st.markdown('<div class="query-panel-title">Pixel information</div>', unsafe_allow_html=True)
+    # -------------------------------------------------------------------------
+    # INFORMACIÓN DEL PIXEL
+    # -------------------------------------------------------------------------
+
+    st.markdown(
+        '<div class="query-panel-title">Pixel information</div>',
+        unsafe_allow_html=True
+    )
+
     with st.container():
+
         if click_data:
-            lat = float(click_data["lat"])
-            lon = float(click_data["lng"])
+
+            lat = float(
+                click_data["lat"]
+            )
+
+            lon = float(
+                click_data["lng"]
+            )
 
             gwrc_value, gwrc_row, gwrc_col = _query_raster_value(
                 GWRC_FILE,
                 lon,
                 lat
             )
+
             gwrck_value, _, _ = _query_raster_value(
                 GWRCK_FILE,
                 lon,
@@ -651,53 +856,137 @@ with right_col:
 
             pixel_lat = lat
             pixel_lon = lon
-            if gwrc_value is not None:
-                with rasterio.open(GWRC_FILE) as src:
-                    xs, ys = rio_transform("EPSG:4326", src.crs, [lon], [lat])
-                    row, col = src.index(xs[0], ys[0])
-                    cx, cy = rasterio.transform.xy(src.transform, row, col, offset="center")
-                    plon, plat = rio_transform(src.crs, "EPSG:4326", [cx], [cy])
-                    pixel_lon = float(plon[0])
-                    pixel_lat = float(plat[0])
 
-            st.markdown('<div class="query-card">', unsafe_allow_html=True)
-            st.markdown('<div class="query-title">SOC Value of the Selected Pixel</div>', unsafe_allow_html=True)
-            st.caption(f"Pixel center: {pixel_lat:.6f}°, {pixel_lon:.6f}°")
+            if gwrc_value is not None:
+
+                with rasterio.open(GWRC_FILE) as src:
+
+                    xs, ys = rio_transform(
+                        "EPSG:4326",
+                        src.crs,
+                        [lon],
+                        [lat]
+                    )
+
+                    row, col = src.index(
+                        xs[0],
+                        ys[0]
+                    )
+
+                    cx, cy = rasterio.transform.xy(
+                        src.transform,
+                        row,
+                        col,
+                        offset="center"
+                    )
+
+                    plon, plat = rio_transform(
+                        src.crs,
+                        "EPSG:4326",
+                        [cx],
+                        [cy]
+                    )
+
+                    pixel_lon = float(
+                        plon[0]
+                    )
+
+                    pixel_lat = float(
+                        plat[0]
+                    )
+
+            st.markdown(
+                '<div class="query-card">',
+                unsafe_allow_html=True
+            )
+
+            st.markdown(
+                """
+                <div class="query-title">
+                    SOC Value of the Selected Pixel
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            st.caption(
+                f"Pixel center: "
+                f"{pixel_lat:.6f}°, "
+                f"{pixel_lon:.6f}°"
+            )
 
             q1, q2 = st.columns(2)
+
             with q1:
+
                 st.metric(
                     "GWRC",
-                    f"{gwrc_value:.2f} Mg ha⁻¹" if gwrc_value is not None else "No data"
-                )
-            with q2:
-                st.metric(
-                    "GWRCK",
-                    f"{gwrck_value:.2f} Mg ha⁻¹" if gwrck_value is not None else "No data"
+                    (
+                        f"{gwrc_value:.2f} Mg ha⁻¹"
+                        if gwrc_value is not None
+                        else "No data"
+                    )
                 )
 
-            if gwrc_row is not None and gwrc_col is not None:
-                st.caption(f"GWRC raster cell: row {gwrc_row + 1}, column {gwrc_col + 1}")
-            st.markdown('</div>', unsafe_allow_html=True)
-        else:
-            st.info(
-                "Click on a pixel in the map to display its GWRC and GWRCK SOC values."
+            with q2:
+
+                st.metric(
+                    "GWRCK",
+                    (
+                        f"{gwrck_value:.2f} Mg ha⁻¹"
+                        if gwrck_value is not None
+                        else "No data"
+                    )
+                )
+
+            if (
+                gwrc_row is not None
+                and gwrc_col is not None
+            ):
+
+                st.caption(
+                    f"GWRC raster cell: "
+                    f"row {gwrc_row + 1}, "
+                    f"column {gwrc_col + 1}"
+                )
+
+            st.markdown(
+                "</div>",
+                unsafe_allow_html=True
             )
-# Additional information remains below the main two-column landing section.
+
+        else:
+
+            st.info(
+                "Click on a pixel in the map to display its GWRC "
+                "and GWRCK SOC values."
+            )
+
+
+# -----------------------------------------------------------------------------
+# INFORMACIÓN ADICIONAL
+# -----------------------------------------------------------------------------
+
 st.divider()
+
 st.markdown(
     """
-    **Data interpretation**  
-    SOC values are expressed as **Mg ha⁻¹**. Each pixel represents a 30 × 30 m spatial unit.
-    The displayed model results were previously processed and are provided directly through
-    this viewer; no model recalculation is performed by the application.
+    **Data interpretation**
+
+    SOC values are expressed as **Mg ha⁻¹**.
+    Each pixel represents a 30 × 30 m spatial unit.
+
+    The displayed model results were previously processed and are provided
+    directly through this viewer; no model recalculation is performed by
+    the application.
     """
 )
 
 st.markdown(
     """
     <div class="footer-note">
-        Soil Organic Carbon Viewer · GWRC and GWRCK spatial models · Amoju River Valley, Jaen, Peru
+        Soil Organic Carbon Viewer · GWRC and GWRCK spatial models ·
+        Amoju River Valley, Jaen, Peru
     </div>
     """,
     unsafe_allow_html=True
