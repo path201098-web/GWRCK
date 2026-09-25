@@ -719,9 +719,7 @@ with left_col:
         component of soil functioning because its spatial distribution
         is related to soil quality, nutrient dynamics, and the capacity
         of agricultural soils to retain and cycle carbon.
-
         <br><br>
-
         This interactive map presents the spatial distribution of soil
         organic carbon estimated using the <b>GWRC</b> and
         <b>GWRCK</b> models. The resulting spatial information can help
